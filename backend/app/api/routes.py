@@ -1,0 +1,610 @@
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
+from pathlib import Path
+import pandas as pd
+
+from ..services.data import load_csv, timeframe_path
+from ..services.journal import add_trade, list_trades
+from ..analysis.indicators import add_indicators
+from ..analysis.structure import analyze_structure
+from ..analysis.liquidity import analyze_liquidity
+from ..analysis.confluence import analyze_confluence
+from ..analysis.price_action import analyze_price_action
+from ..analysis.patterns import candlesticks, chart_patterns
+from ..analysis.levels import analyze_support_resistance
+from ..analysis.risk import risk_plan, levels_from_atr
+from ..analysis.scoring import score_setup
+from ..analysis.mtf import analyze_mtf
+from ..analysis.backtest import backtest
+
+
+
+router = APIRouter(prefix="/api")
+DATA = Path("/app/data") if Path("/app/data").exists() else Path(__file__).resolve().parents[3] / "data"
+
+class AnalyzeRequest(BaseModel):
+    asset: str = "XAUUSD"
+    csv_path: str | None = None
+    capital: float = 10000
+    risk_pct: float = 1
+    min_rr: float = 2
+    timeframe: str = "15m"
+    htf_timeframe: str = "1h"
+    hierarchy: list[str] | None = None
+
+class BacktestRequest(AnalyzeRequest):
+    pass
+
+class JournalRequest(BaseModel):
+    timestamp: str
+    asset: str
+    direction: str
+    entry: float
+    stop_loss: float
+    take_profit: float
+    quantity: float
+    score: float
+    result: str = "OPEN"
+    r_multiple: float | None = None
+    notes: str | None = None
+
+
+def getdf(name=None, timeframe="15m", asset="XAUUSD", limit=5000):
+    if name:
+        p = Path(name)
+        if not p.is_absolute():
+            p = DATA / p.name
+    else:
+        try:
+            p = timeframe_path(DATA, timeframe, asset)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+    if not p.exists():
+        raise HTTPException(404, f"Data file not found: {p}")
+    return load_csv(p, limit=limit)
+
+
+
+
+def _hierarchy(req):
+    return req.hierarchy or (["4h", "1h", "15m", "5m"] if req.timeframe == "5m" else ["4h", "1h", req.timeframe, "5m"])
+
+def _load_mtf(req):
+    frames = {}
+    for tf in dict.fromkeys(_hierarchy(req)):
+        try:
+            frames[tf] = getdf(timeframe=tf, asset=req.asset, limit=1500)
+        except HTTPException:
+            frames[tf] = None
+    return frames
+
+def make_signal(df, req):
+    if len(df) < 60:
+        return {"status": "Insufficient data"}
+
+    d = add_indicators(df)
+
+    # ============================================================
+    # 1. DETERMINISTIC ANALYSIS ENGINES
+    # ============================================================
+    st = analyze_structure(d)
+    liquidity = analyze_liquidity(d)
+    cps = candlesticks(d)
+    pats = chart_patterns(d)
+    levels = analyze_support_resistance(d)
+
+    # Price Action uses completed candles + S/R + structure context
+    pa = analyze_price_action(
+        d,
+        sr=levels,
+        structure=st,
+    )
+
+    # ============================================================
+    # 2. BASIC CURRENT MARKET DATA
+    # ============================================================
+    last = d.iloc[-1]
+    entry = float(last.close)
+    atr = float(last.atr)
+
+    if not pd.notna(atr) or atr <= 0:
+        return {
+            "status": "NO TRADE",
+            "reason": "ATR unavailable.",
+            "data_source": "MT5 historical CSV",
+            "timeframe": req.timeframe,
+        }
+
+    # ============================================================
+    # 3. MULTI-TIMEFRAME ANALYSIS
+    #
+    # Default hierarchy:
+    # 4H -> 1H -> 15M -> 5M
+    # ============================================================
+    frames = _load_mtf(req)
+    hierarchy = _hierarchy(req)
+
+    mtf = analyze_mtf(
+        frames,
+        hierarchy,
+    )
+
+    # Analyze structure independently on every available timeframe
+    structure_by_tf = {}
+
+    for tf, frame_df in frames.items():
+
+        if frame_df is None or len(frame_df) < 60:
+            continue
+
+        frame_with_indicators = add_indicators(
+            frame_df.copy()
+        )
+
+        structure_by_tf[tf] = analyze_structure(
+            frame_with_indicators
+        )
+
+    # ============================================================
+    # 4. STRUCTURE + LIQUIDITY CONFLUENCE
+    # ============================================================
+    confluence = analyze_confluence(
+        structures=structure_by_tf,
+        liquidity=liquidity,
+        timeframe=req.timeframe,
+    )
+
+    # ============================================================
+    # 5. MTF DIRECTION
+    # ============================================================
+    weighted = mtf.get(
+        "weighted_bias",
+        "NEUTRAL",
+    )
+
+    direction = (
+        "LONG"
+        if weighted == "BULLISH"
+        else "SHORT"
+        if weighted == "BEARISH"
+        else None
+    )
+
+    if not direction:
+        return {
+            "status": "NO TRADE",
+            "reason": "MTF bias is neutral/conflicted.",
+            "mtf": mtf,
+            "market_structure": st,
+            "confluence": confluence,
+            "liquidity": liquidity,
+            "levels": levels,
+            "price_action": pa,
+            "data_source": "MT5 historical CSV",
+            "timeframe": req.timeframe,
+        }
+
+    # ============================================================
+    # 6. PRICE ACTION
+    # ============================================================
+    price_action_direction = pa.get(
+        "direction",
+        "NEUTRAL",
+    )
+
+    price_action_score = float(
+        pa.get("score", 0)
+    )
+
+    # ============================================================
+    # 7. TREND / MOMENTUM / VOLUME
+    # ============================================================
+    candle_dir = (
+        "BULLISH"
+        if any(
+            x["direction"] == "BULLISH"
+            for x in cps[-3:]
+        )
+        else
+        "BEARISH"
+        if any(
+            x["direction"] == "BEARISH"
+            for x in cps[-3:]
+        )
+        else "NEUTRAL"
+    )
+
+    trend_ok = (
+        (
+            direction == "LONG"
+            and entry > float(last.ema_20)
+            > float(last.ema_50)
+        )
+        or
+        (
+            direction == "SHORT"
+            and entry < float(last.ema_20)
+            < float(last.ema_50)
+        )
+    )
+
+    rsi = (
+        float(last.rsi)
+        if pd.notna(last.rsi)
+        else 50.0
+    )
+
+    momentum_ok = (
+        (direction == "LONG" and rsi >= 52)
+        or
+        (direction == "SHORT" and rsi <= 48)
+    )
+
+    vol_ok = (
+        float(last.volume) >= float(last.volume_ma)
+        if pd.notna(last.volume_ma)
+        else False
+    )
+
+    # ============================================================
+    # 8. S/R EVIDENCE
+    # ============================================================
+    relevant_zones = levels.get(
+        "relevant_zones",
+        [],
+    )
+
+    if isinstance(relevant_zones, list):
+        sr_zones = relevant_zones
+    else:
+        sr_zones = levels.get(
+            "zones",
+            [],
+        )
+
+    if not isinstance(sr_zones, list):
+        sr_zones = []
+
+    nearest_support = levels.get(
+        "nearest_support"
+    )
+
+    nearest_resistance = levels.get(
+        "nearest_resistance"
+    )
+
+    sr_ok = bool(
+        nearest_support is not None
+        or
+        nearest_resistance is not None
+        or
+        len(sr_zones) > 0
+    )
+
+    # ============================================================
+    # 9. STRUCTURAL EVENTS
+    # ============================================================
+    target_bias = (
+        "BULLISH"
+        if direction == "LONG"
+        else "BEARISH"
+    )
+
+    bos_ok = (
+        bool(st.get("bos"))
+        and
+        st["bos"][-1]["direction"] == target_bias
+    )
+
+    choch_ok = (
+        bool(st.get("choch"))
+        and
+        st["choch"][-1]["direction"] == target_bias
+    )
+
+    # ============================================================
+    # 10. RISK PLAN
+    # ============================================================
+    sl, tp = levels_from_atr(
+        direction,
+        entry,
+        atr,
+    )
+
+    plan = risk_plan(
+        req.capital,
+        req.risk_pct,
+        entry,
+        sl,
+        tp,
+    )
+
+    # ============================================================
+    # 11. MTF ALIGNMENT
+    # ============================================================
+    aligned_count = sum(
+        1
+        for v in mtf.get("timeframes", {}).values()
+        if v.get("bias") == target_bias
+    )
+
+    # ============================================================
+    # 12. PRICE ACTION CONFIRMATION
+    # ============================================================
+    price_action_ok = (
+        price_action_direction == target_bias
+    )
+
+    price_action_confirmation = (
+        price_action_score >= 40
+        and price_action_ok
+    )
+
+    # ============================================================
+    # 13. TRANSPARENT SCORE
+    # ============================================================
+    factors = {
+        "mtf_alignment": (
+            25
+            if aligned_count >= 3
+            else 12
+            if aligned_count >= 2
+            else 0
+        ),
+
+        "market_structure": (
+            15
+            if st["bias"] == target_bias
+            else 0
+        ),
+
+        "trend_ema": (
+            15
+            if trend_ok
+            else 0
+        ),
+
+        "momentum_rsi": (
+            10
+            if momentum_ok
+            else 0
+        ),
+
+        "bos_choch": (
+            10
+            if bos_ok or choch_ok
+            else 0
+        ),
+
+        "volume": (
+            10
+            if vol_ok
+            else 0
+        ),
+
+        "sr_context": (
+            5
+            if sr_ok
+            else 0
+        ),
+
+        "price_action": (
+            10
+            if price_action_confirmation
+            else 0
+        ),
+
+        "risk_reward": (
+            10
+            if plan["rr"] >= req.min_rr
+            else 0
+        ),
+    }
+
+    raw_score = sum(
+        factors.values()
+    )
+
+    # Actual maximum of the factors above:
+    # 25 + 15 + 15 + 10 + 10 + 10 + 5 + 10 + 10 = 110
+    max_score = sum([
+        25,
+        15,
+        15,
+        10,
+        10,
+        10,
+        5,
+        10,
+        10,
+    ])
+
+    score = round(
+        (raw_score / max_score) * 100,
+        2,
+    )
+
+    grade = (
+        "A+"
+        if score >= 85
+        else
+        "A"
+        if score >= 75
+        else
+        "B"
+        if score >= 65
+        else
+        "Weak"
+        if score >= 50
+        else
+        "No trade"
+    )
+
+    # ============================================================
+    # 14. TRADE STATUS
+    # ============================================================
+    if plan["rr"] < req.min_rr:
+        status = "NO TRADE"
+
+    elif not price_action_confirmation:
+        status = "WAIT FOR CONFIRMATION"
+
+    elif score >= 75:
+        status = "WAIT FOR CONFIRMATION"
+
+    else:
+        status = "WAIT FOR CONFIRMATION"
+
+    # ============================================================
+    # 15. FINAL RESPONSE
+    # ============================================================
+    return {
+        "status": status,
+
+        "asset": req.asset,
+        "timeframe": req.timeframe,
+
+        "direction": direction,
+
+        "current_price": entry,
+
+        "htf_bias": weighted,
+
+        "mtf": mtf,
+
+        "market_structure": st,
+
+        "structure_by_timeframe": structure_by_tf,
+
+        "liquidity": liquidity,
+
+        "confluence": confluence,
+
+        "price_action": pa,
+
+        "candlesticks": cps[-8:],
+
+        "chart_patterns": pats,
+
+        "levels": levels,
+
+        "entry": entry,
+
+        "stop_loss": plan["stop_loss"],
+
+        "take_profit_1": plan["take_profit_1"],
+
+        "rr": plan["rr"],
+
+        "quantity": plan["quantity"],
+
+        "risk_amount": plan["risk_amount"],
+
+        "score": score,
+
+        "grade": grade,
+
+        "score_factors": factors,
+
+        "reasons": [
+            f"MTF weighted bias: {weighted}",
+
+            f"EMA trend: "
+            f"{'aligned' if trend_ok else 'not aligned'}",
+
+            f"RSI momentum: {rsi:.1f}",
+
+            f"BOS/CHoCH confirmation: "
+            f"{'present' if bos_ok or choch_ok else 'not present'}",
+
+            f"Volume confirmation: "
+            f"{'yes' if vol_ok else 'no'}",
+
+            f"S/R context: "
+            f"{'present' if sr_ok else 'not present'}",
+
+            f"Price action: "
+            f"{price_action_direction} "
+            f"({price_action_score:.1f}/100)",
+
+            f"Risk/reward: "
+            f"1:{plan['rr']:.2f}",
+        ],
+
+        "invalidation": (
+            f"{'Close below' if direction == 'LONG' else 'Close above'} "
+            f"{plan['stop_loss']:.4f}"
+        ),
+
+        "data_source": "MT5 historical CSV",
+    }
+@router.get("/mtf/config")
+def mtf_config():
+    return {"default_hierarchy": ["4h", "1h", "15m", "5m"], "description": "Higher timeframe bias → structure → setup → entry confirmation."}
+
+@router.get("/health")
+def health():
+    files = list((DATA / "mt5").glob("XAUUSD_*.csv")) if (DATA / "mt5").exists() else []
+    return {"status": "ok", "mt5_historical_data": bool(files), "files": [p.name for p in files]}
+
+@router.get("/config")
+def config():
+    return {"assets": ["XAUUSD", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "NIFTY", "BANKNIFTY"],
+            "timeframes": ["1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"]}
+
+@router.get("/candles")
+def candles(asset: str = Query("XAUUSD"), timeframe: str = Query("15m"), limit: int = Query(500, ge=50, le=5000)):
+    df = getdf(timeframe=timeframe, asset=asset, limit=limit)
+    rows = []
+    for r in df.itertuples(index=False):
+        rows.append({"time": int(r.timestamp.timestamp()), "open": float(r.open), "high": float(r.high), "low": float(r.low), "close": float(r.close)})
+    return {"asset": asset, "timeframe": timeframe, "count": len(rows), "candles": rows, "data_source": "MT5 historical CSV"}
+
+@router.get("/liquidity")
+def liquidity(
+    asset: str = Query("XAUUSD"),
+    timeframe: str = Query("15m"),
+):
+    df = getdf(
+        timeframe=timeframe,
+        asset=asset,
+        limit=5000
+    )
+
+    d = add_indicators(df)
+
+    return {
+        "asset": asset,
+        "timeframe": timeframe,
+        "liquidity": analyze_liquidity(d),
+        "data_source": "MT5 historical CSV",
+    }
+
+@router.post("/analyze")
+def analyze(req: AnalyzeRequest):
+    return make_signal(getdf(req.csv_path, req.timeframe, req.asset, 5000), req)
+
+@router.post("/backtest")
+def run_backtest(req: BacktestRequest):
+    try:
+        # Keep the HTTP request bounded. The full 7M-row history remains on disk;
+        # a backtest only needs a configurable recent window for the MVP.
+        df = getdf(req.csv_path, req.timeframe, req.asset, 5000)
+
+        def signal_fn(part):
+            try:
+                return make_signal(part.tail(1500), req)
+            except Exception:
+                return None
+
+        return backtest(df, signal_fn, req.capital, req.risk_pct, max_bars=5000, step=10)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Backtest failed safely: {type(exc).__name__}: {exc}")
+
+@router.post("/journal")
+def journal(req: JournalRequest): return add_trade(req.model_dump())
+
+@router.get("/journal")
+def journal_list(): return list_trades()

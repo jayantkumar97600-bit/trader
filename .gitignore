@@ -1,0 +1,52 @@
+@"
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Secrets
+.env
+.env.*
+
+# Next.js
+.next/
+out/
+
+# Node
+node_modules/
+
+# Logs
+*.log
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Python test/cache
+.pytest_cache/
+.coverage
+htmlcov/
+"@ | Set-Content .gitignore
+
+Add-Content .gitignore "`n# Large trading datasets`ndata/mt5/XAUUSD_M1.csv`ndata/mt5/XAUUSD_M3.csv`ndata/mt5/XAUUSD_M5.csv`n`n# Local trading database`nbackend/trading.db`n"
+# Large trading datasets
+data/mt5/XAUUSD_M1.csv
+data/mt5/XAUUSD_M3.csv
+data/mt5/XAUUSD_M5.csv
+
+# Local database
+backend/trading.db
+
+
+# Large trading datasets
+data/mt5/XAUUSD_M1.csv
+data/mt5/XAUUSD_M3.csv
+data/mt5/XAUUSD_M5.csv
+
+# Local database
+backend/trading.db
+

@@ -1,738 +1,881 @@
-from __future__ import annotations
-
 from typing import Any
-import math
-import pandas as pd
 
 
-def _num(value: Any, default: float = 0.0) -> float:
+BULLISH = "BULLISH"
+BEARISH = "BEARISH"
+NEUTRAL = "NEUTRAL"
+
+
+def _safe_float(value, default=0.0):
     try:
-        v = float(value)
-        return v if math.isfinite(v) else default
-    except Exception:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
         return default
 
 
-def _calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
-    if len(df) < 2:
-        return 0.0
+def _clamp(value, low=0.0, high=100.0):
+    return max(low, min(high, float(value)))
 
-    high = pd.to_numeric(df["high"], errors="coerce")
-    low = pd.to_numeric(df["low"], errors="coerce")
-    close = pd.to_numeric(df["close"], errors="coerce")
 
-    previous_close = close.shift(1)
-
-    true_range = pd.concat(
-        [
-            high - low,
-            (high - previous_close).abs(),
-            (low - previous_close).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-
-    atr = true_range.rolling(period, min_periods=period).mean()
-
-    return _num(
-        atr.iloc[-1],
-        _num(true_range.tail(period).mean(), 0.0),
+def _body(row):
+    return abs(
+        _safe_float(row.get("close"))
+        - _safe_float(row.get("open"))
     )
 
 
-def _candle(row: pd.Series) -> dict[str, float]:
-    open_price = _num(row["open"])
-    high = _num(row["high"])
-    low = _num(row["low"])
-    close = _num(row["close"])
+def _range(row):
+    return (
+        _safe_float(row.get("high"))
+        - _safe_float(row.get("low"))
+    )
 
-    candle_range = max(high - low, 0.0)
-    body = abs(close - open_price)
 
-    upper_wick = max(high - max(open_price, close), 0.0)
-    lower_wick = max(min(open_price, close) - low, 0.0)
+def _upper_wick(row):
+    high = _safe_float(row.get("high"))
+    op = _safe_float(row.get("open"))
+    close = _safe_float(row.get("close"))
+
+    return high - max(op, close)
+
+
+def _lower_wick(row):
+    low = _safe_float(row.get("low"))
+    op = _safe_float(row.get("open"))
+    close = _safe_float(row.get("close"))
+
+    return min(op, close) - low
+
+
+def _candle_direction(row):
+    op = _safe_float(row.get("open"))
+    close = _safe_float(row.get("close"))
+
+    if close > op:
+        return BULLISH
+
+    if close < op:
+        return BEARISH
+
+    return NEUTRAL
+
+
+def _atr(row):
+    value = _safe_float(
+        row.get("atr"),
+        0.0,
+    )
+
+    return value if value > 0 else None
+
+
+# ---------------------------------------------------------
+# Candle quality
+# ---------------------------------------------------------
+
+def _candle_quality(row):
+    candle_range = _range(row)
+    body = _body(row)
+
+    if candle_range <= 0:
+        return {
+            "quality": "INVALID",
+            "body_ratio": 0.0,
+            "direction": NEUTRAL,
+        }
+
+    body_ratio = body / candle_range
+
+    if body_ratio >= 0.70:
+        quality = "STRONG"
+
+    elif body_ratio >= 0.45:
+        quality = "NORMAL"
+
+    elif body_ratio >= 0.20:
+        quality = "WEAK"
+
+    else:
+        quality = "INDECISION"
 
     return {
-        "open": open_price,
-        "high": high,
-        "low": low,
-        "close": close,
-        "range": candle_range,
-        "body": body,
-        "body_ratio": body / candle_range if candle_range else 0.0,
-        "upper_wick": upper_wick,
-        "lower_wick": lower_wick,
-        "close_location": (
-            (close - low) / candle_range
-            if candle_range
-            else 0.5
+        "quality": quality,
+        "body_ratio": round(body_ratio, 3),
+        "direction": _candle_direction(row),
+    }
+
+
+# ---------------------------------------------------------
+# Momentum / displacement
+# ---------------------------------------------------------
+
+def _momentum(df):
+    if df is None or len(df) < 5:
+        return {
+            "state": "UNKNOWN",
+            "direction": NEUTRAL,
+            "displacement_atr": 0.0,
+        }
+
+    last = df.iloc[-1]
+
+    candle_range = _range(last)
+    atr = _atr(last)
+
+    if atr is None or atr <= 0:
+        return {
+            "state": "UNKNOWN",
+            "direction": NEUTRAL,
+            "displacement_atr": 0.0,
+        }
+
+    displacement = candle_range / atr
+    direction = _candle_direction(last)
+
+    if displacement >= 1.5:
+        state = "STRONG"
+
+    elif displacement >= 1.0:
+        state = "MODERATE"
+
+    else:
+        state = "WEAK"
+
+    return {
+        "state": state,
+        "direction": direction,
+        "displacement_atr": round(
+            displacement,
+            3,
         ),
     }
 
 
-def _get_zones(
-    sr: Any,
-    key: str,
-) -> list[dict[str, Any]]:
+# ---------------------------------------------------------
+# Rejection
+# ---------------------------------------------------------
 
+def _rejection(row):
+    candle_range = _range(row)
+
+    if candle_range <= 0:
+        return {
+            "state": "NONE",
+            "direction": NEUTRAL,
+        }
+
+    upper = _upper_wick(row)
+    lower = _lower_wick(row)
+    body = _body(row)
+
+    upper_ratio = upper / candle_range
+    lower_ratio = lower / candle_range
+    body_ratio = body / candle_range
+
+    # Bearish rejection:
+    # large upper wick + relatively small body.
+    if (
+        upper_ratio >= 0.45
+        and upper > body * 1.5
+    ):
+        return {
+            "state": "REJECTION",
+            "direction": BEARISH,
+            "wick_ratio": round(
+                upper_ratio,
+                3,
+            ),
+        }
+
+    # Bullish rejection:
+    # large lower wick + relatively small body.
+    if (
+        lower_ratio >= 0.45
+        and lower > body * 1.5
+    ):
+        return {
+            "state": "REJECTION",
+            "direction": BULLISH,
+            "wick_ratio": round(
+                lower_ratio,
+                3,
+            ),
+        }
+
+    return {
+        "state": "NONE",
+        "direction": NEUTRAL,
+        "wick_ratio": 0.0,
+    }
+
+
+# ---------------------------------------------------------
+# Engulfing
+# ---------------------------------------------------------
+
+def _engulfing(df):
+    if df is None or len(df) < 2:
+        return {
+            "state": "NONE",
+            "direction": NEUTRAL,
+        }
+
+    prev = df.iloc[-2]
+    curr = df.iloc[-1]
+
+    prev_open = _safe_float(prev.get("open"))
+    prev_close = _safe_float(prev.get("close"))
+
+    curr_open = _safe_float(curr.get("open"))
+    curr_close = _safe_float(curr.get("close"))
+
+    # Bullish engulfing
+    if (
+        prev_close < prev_open
+        and curr_close > curr_open
+        and curr_open <= prev_close
+        and curr_close >= prev_open
+    ):
+        return {
+            "state": "ENGULFING",
+            "direction": BULLISH,
+        }
+
+    # Bearish engulfing
+    if (
+        prev_close > prev_open
+        and curr_close < curr_open
+        and curr_open >= prev_close
+        and curr_close <= prev_open
+    ):
+        return {
+            "state": "ENGULFING",
+            "direction": BEARISH,
+        }
+
+    return {
+        "state": "NONE",
+        "direction": NEUTRAL,
+    }
+
+
+# ---------------------------------------------------------
+# Breakout / false breakout
+# ---------------------------------------------------------
+
+def _breakout(df, lookback=20):
+    if df is None or len(df) < lookback + 1:
+        return {
+            "state": "NONE",
+            "direction": NEUTRAL,
+            "level": None,
+        }
+
+    previous = df.iloc[-lookback - 1:-1]
+    last = df.iloc[-1]
+
+    previous_high = _safe_float(
+        previous["high"].max()
+    )
+
+    previous_low = _safe_float(
+        previous["low"].min()
+    )
+
+    close = _safe_float(last.get("close"))
+    high = _safe_float(last.get("high"))
+    low = _safe_float(last.get("low"))
+
+    # Bullish breakout
+    if close > previous_high:
+        return {
+            "state": "BREAKOUT",
+            "direction": BULLISH,
+            "level": previous_high,
+        }
+
+    # Bearish breakout
+    if close < previous_low:
+        return {
+            "state": "BREAKOUT",
+            "direction": BEARISH,
+            "level": previous_low,
+        }
+
+    # False breakout above range
+    if (
+        high > previous_high
+        and close < previous_high
+    ):
+        return {
+            "state": "FALSE_BREAKOUT",
+            "direction": BEARISH,
+            "level": previous_high,
+        }
+
+    # False breakout below range
+    if (
+        low < previous_low
+        and close > previous_low
+    ):
+        return {
+            "state": "FALSE_BREAKOUT",
+            "direction": BULLISH,
+            "level": previous_low,
+        }
+
+    return {
+        "state": "NONE",
+        "direction": NEUTRAL,
+        "level": None,
+    }
+
+
+# ---------------------------------------------------------
+# Consolidation
+# ---------------------------------------------------------
+
+def _consolidation(df, lookback=12):
+    if df is None or len(df) < lookback:
+        return {
+            "state": "UNKNOWN",
+            "range_atr": None,
+        }
+
+    window = df.iloc[-lookback:]
+
+    high = _safe_float(
+        window["high"].max()
+    )
+
+    low = _safe_float(
+        window["low"].min()
+    )
+
+    last_atr = _atr(df.iloc[-1])
+
+    if last_atr is None or last_atr <= 0:
+        return {
+            "state": "UNKNOWN",
+            "range_atr": None,
+        }
+
+    range_atr = (high - low) / last_atr
+
+    if range_atr <= 3.0:
+        state = "CONSOLIDATION"
+    else:
+        state = "EXPANDED"
+
+    return {
+        "state": state,
+        "range_atr": round(
+            range_atr,
+            3,
+        ),
+    }
+
+
+# ---------------------------------------------------------
+# Range expansion / contraction
+# ---------------------------------------------------------
+
+def _range_behavior(df):
+    if df is None or len(df) < 12:
+        return {
+            "state": "UNKNOWN",
+        }
+
+    recent = df.iloc[-5:]
+    previous = df.iloc[-10:-5]
+
+    recent_ranges = (
+        recent["high"]
+        - recent["low"]
+    )
+
+    previous_ranges = (
+        previous["high"]
+        - previous["low"]
+    )
+
+    recent_mean = _safe_float(
+        recent_ranges.mean()
+    )
+
+    previous_mean = _safe_float(
+        previous_ranges.mean()
+    )
+
+    if previous_mean <= 0:
+        return {
+            "state": "UNKNOWN",
+        }
+
+    ratio = recent_mean / previous_mean
+
+    if ratio >= 1.30:
+        state = "EXPANSION"
+
+    elif ratio <= 0.75:
+        state = "CONTRACTION"
+
+    else:
+        state = "NORMAL"
+
+    return {
+        "state": state,
+        "ratio": round(
+            ratio,
+            3,
+        ),
+    }
+
+
+# ---------------------------------------------------------
+# Directional context
+# ---------------------------------------------------------
+
+def _structure_context(
+    structure,
+    direction,
+):
+    if not structure:
+        return {
+            "state": "UNKNOWN",
+            "score": 0,
+        }
+
+    structure_bias = structure.get(
+        "bias",
+        NEUTRAL,
+    )
+
+    if structure_bias == direction:
+        return {
+            "state": "ALIGNED",
+            "score": 20,
+        }
+
+    if structure_bias == NEUTRAL:
+        return {
+            "state": "NEUTRAL",
+            "score": 0,
+        }
+
+    return {
+        "state": "CONFLICTING",
+        "score": -20,
+    }
+
+
+# ---------------------------------------------------------
+# S/R context
+# ---------------------------------------------------------
+
+def _sr_context(
+    sr,
+    direction,
+    current_price,
+):
     if not sr:
-        return []
+        return {
+            "state": "NONE",
+            "score": 0,
+            "zone": None,
+        }
 
-    # New S/R engine may return a dictionary
-    # such as {"supports": [...], "resistances": [...]}.
-    if isinstance(sr, dict):
-
-        zones = sr.get(key) or []
-
-        return [
-            zone
-            for zone in zones
-            if isinstance(zone, dict)
-        ]
-
-    # Existing S/R engine may return a flat list of zones.
     if isinstance(sr, list):
-
-        expected_kind = (
-            "SUPPORT"
-            if key == "supports"
-            else "RESISTANCE"
+        zones = sr
+    else:
+        zones = sr.get(
+            "relevant_zones",
+            [],
         )
 
-        result = []
+    if not zones:
+        return {
+            "state": "NONE",
+            "score": 0,
+            "zone": None,
+        }
 
-        for zone in sr:
+    preferred = (
+        "SUPPORT"
+        if direction == BULLISH
+        else "RESISTANCE"
+    )
 
-            if not isinstance(zone, dict):
-                continue
-
-            kind = str(
-                zone.get("kind", "")
-            ).upper()
-
-            if kind == expected_kind:
-                result.append(zone)
-
-        return result
-
-    return []
-
-def _nearest_zone(
-    zones: list[dict[str, Any]],
-    price: float,
-    above: bool,
-):
     candidates = []
 
     for zone in zones:
-        center = _num(zone.get("center"))
+        kind = str(
+            zone.get("kind", "")
+        ).upper()
 
-        if above and center > price:
-            candidates.append(
-                (abs(center - price), zone)
-            )
+        if kind != preferred:
+            continue
 
-        elif not above and center < price:
-            candidates.append(
-                (abs(center - price), zone)
-            )
+        price = _safe_float(
+            zone.get("price"),
+            None,
+        )
 
-    candidates.sort(key=lambda item: item[0])
+        if price is None:
+            continue
 
-    return candidates[0][1] if candidates else None
+        candidates.append(zone)
 
-
-def analyze_price_action(
-    df: pd.DataFrame,
-    sr: dict[str, Any] | None = None,
-    structure: dict[str, Any] | None = None,
-    lookback: int = 20,
-) -> dict[str, Any]:
-    """
-    Deterministic price-action engine.
-
-    Uses completed candles only.
-    Does not use future candles.
-    Does not predict price.
-    """
-
-    minimum_bars = max(30, lookback + 5)
-
-    if df is None or len(df) < minimum_bars:
+    if not candidates:
         return {
-            "status": "INSUFFICIENT_DATA",
-            "direction": "NEUTRAL",
-            "score": 0.0,
-            "events": [],
-            "warnings": [
-                "Not enough candles for price-action analysis."
-            ],
+            "state": "NONE",
+            "score": 0,
+            "zone": None,
         }
 
-    required_columns = {
-        "open",
-        "high",
-        "low",
-        "close",
-    }
-
-    missing = required_columns - set(df.columns)
-
-    if missing:
-        return {
-            "status": "INVALID_DATA",
-            "direction": "NEUTRAL",
-            "score": 0.0,
-            "events": [],
-            "warnings": [
-                f"Missing columns: {sorted(missing)}"
-            ],
-        }
-
-    data = df.copy().reset_index(drop=True)
-
-    for column in required_columns:
-        data[column] = pd.to_numeric(
-            data[column],
-            errors="coerce",
-        )
-
-    data = data.dropna(
-        subset=list(required_columns)
-    ).reset_index(drop=True)
-
-    if len(data) < minimum_bars:
-        return {
-            "status": "INSUFFICIENT_DATA",
-            "direction": "NEUTRAL",
-            "score": 0.0,
-            "events": [],
-            "warnings": [
-                "Not enough valid candles after cleaning."
-            ],
-        }
-
-    atr = _calculate_atr(data)
-
-    current = _candle(data.iloc[-1])
-    previous = _candle(data.iloc[-2])
-
-    ranges = (
-        data["high"] - data["low"]
-    ).clip(lower=0)
-
-    bodies = (
-        data["close"] - data["open"]
-    ).abs()
-
-    average_range = _num(
-        ranges.iloc[-lookback:].mean()
-    )
-
-    average_body = _num(
-        bodies.iloc[-lookback:].mean()
-    )
-
-    events: list[dict[str, Any]] = []
-    warnings: list[str] = []
-
-    bullish_score = 0.0
-    bearish_score = 0.0
-
-    def add_event(
-        event_type: str,
-        direction: str,
-        strength: float,
-        reason: str,
-    ):
-        nonlocal bullish_score
-        nonlocal bearish_score
-
-        events.append(
-            {
-                "type": event_type,
-                "direction": direction,
-                "strength": round(
-                    float(strength),
-                    2,
-                ),
-                "reason": reason,
-            }
-        )
-
-        if direction == "BULLISH":
-            bullish_score += strength
-
-        elif direction == "BEARISH":
-            bearish_score += strength
-
-    # ---------------------------------------------------------
-    # 1. REJECTION
-    # ---------------------------------------------------------
-
-    if current["range"] > 0:
-
-        bullish_rejection = (
-            current["lower_wick"]
-            >= max(
-                current["body"] * 1.5,
-                current["range"] * 0.45,
-            )
-            and current["close_location"] >= 0.60
-        )
-
-        bearish_rejection = (
-            current["upper_wick"]
-            >= max(
-                current["body"] * 1.5,
-                current["range"] * 0.45,
-            )
-            and current["close_location"] <= 0.40
-        )
-
-        if bullish_rejection:
-            add_event(
-                "REJECTION",
-                "BULLISH",
-                15,
-                "Long lower wick with close in upper part of candle.",
-            )
-
-        if bearish_rejection:
-            add_event(
-                "REJECTION",
-                "BEARISH",
-                15,
-                "Long upper wick with close in lower part of candle.",
-            )
-
-    # ---------------------------------------------------------
-    # 2. MOMENTUM
-    # ---------------------------------------------------------
-
-    if (
-        average_range > 0
-        and current["range"] >= average_range * 1.5
-        and current["body_ratio"] >= 0.65
-    ):
-
-        if current["close"] > current["open"]:
-            add_event(
-                "MOMENTUM",
-                "BULLISH",
-                15,
-                "Large bullish candle relative to recent range.",
-            )
-
-        elif current["close"] < current["open"]:
-            add_event(
-                "MOMENTUM",
-                "BEARISH",
-                15,
-                "Large bearish candle relative to recent range.",
-            )
-
-    # ---------------------------------------------------------
-    # 3. ENGULFING
-    # ---------------------------------------------------------
-
-    bullish_engulfing = (
-        current["close"] > current["open"]
-        and previous["close"] < previous["open"]
-        and current["open"] <= previous["close"]
-        and current["close"] >= previous["open"]
-    )
-
-    bearish_engulfing = (
-        current["close"] < current["open"]
-        and previous["close"] > previous["open"]
-        and current["open"] >= previous["close"]
-        and current["close"] <= previous["open"]
-    )
-
-    if bullish_engulfing:
-        add_event(
-            "ENGULFING",
-            "BULLISH",
-            10,
-            "Current bullish body engulfs previous bearish body.",
-        )
-
-    if bearish_engulfing:
-        add_event(
-            "ENGULFING",
-            "BEARISH",
-            10,
-            "Current bearish body engulfs previous bullish body.",
-        )
-
-    # ---------------------------------------------------------
-    # 4. RANGE EXPANSION / CONTRACTION
-    # ---------------------------------------------------------
-
-    recent_ranges = ranges.iloc[-lookback:]
-
-    if len(recent_ranges) >= 10:
-
-        first_half = _num(
-            recent_ranges.iloc[
-                : len(recent_ranges) // 2
-            ].mean()
-        )
-
-        second_half = _num(
-            recent_ranges.iloc[
-                len(recent_ranges) // 2 :
-            ].mean()
-        )
-
-        if (
-            first_half > 0
-            and second_half <= first_half * 0.75
-        ):
-            events.append(
-                {
-                    "type": "RANGE_CONTRACTION",
-                    "direction": "NEUTRAL",
-                    "strength": 8,
-                    "reason": "Recent candle ranges are contracting.",
-                }
-            )
-
-        elif (
-            first_half > 0
-            and second_half >= first_half * 1.35
-        ):
-
-            direction = (
-                "BULLISH"
-                if current["close"] > current["open"]
-                else "BEARISH"
-            )
-
-            add_event(
-                "RANGE_EXPANSION",
-                direction,
-                8,
-                "Recent candle ranges are expanding.",
-            )
-
-    # ---------------------------------------------------------
-    # 5. LOCAL RANGE BREAKOUT
-    # ---------------------------------------------------------
-
-    prior_high = _num(
-        data["high"].iloc[
-            -lookback - 1 : -1
-        ].max()
-    )
-
-    prior_low = _num(
-        data["low"].iloc[
-            -lookback - 1 : -1
-        ].min()
-    )
-
-    if current["close"] > prior_high:
-
-        add_event(
-            "BREAKOUT",
-            "BULLISH",
-            18,
-            "Completed candle closed above prior range high.",
-        )
-
-    elif current["close"] < prior_low:
-
-        add_event(
-            "BREAKOUT",
-            "BEARISH",
-            18,
-            "Completed candle closed below prior range low.",
-        )
-
-    # ---------------------------------------------------------
-    # 6. FALSE BREAKOUT
-    # ---------------------------------------------------------
-
-    if (
-        previous["high"] > prior_high
-        and previous["close"] <= prior_high
-        and current["close"] < previous["low"]
-    ):
-
-        add_event(
-            "FALSE_BREAKOUT",
-            "BEARISH",
-            18,
-            "Previous candle swept range high and next candle confirmed downside.",
-        )
-
-    if (
-        previous["low"] < prior_low
-        and previous["close"] >= prior_low
-        and current["close"] > previous["high"]
-    ):
-
-        add_event(
-            "FALSE_BREAKOUT",
-            "BULLISH",
-            18,
-            "Previous candle swept range low and next candle confirmed upside.",
-        )
-
-    # ---------------------------------------------------------
-    # 7. SUPPORT / RESISTANCE CONTEXT
-    # ---------------------------------------------------------
-
-    resistances = _get_zones(
-        sr,
-        "resistances",
-    )
-
-    supports = _get_zones(
-        sr,
-        "supports",
-    )
-
-    nearest_resistance = _nearest_zone(
-        resistances,
-        current["close"],
-        above=True,
-    )
-
-    nearest_support = _nearest_zone(
-        supports,
-        current["close"],
-        above=False,
-    )
-
-    breakout_buffer = atr * 0.20
-
-    if nearest_resistance:
-
-        resistance_lower = _num(
-            nearest_resistance.get("lower")
-        )
-
-        resistance_upper = _num(
-            nearest_resistance.get("upper")
-        )
-
-        if (
-            current["close"]
-            > resistance_upper + breakout_buffer
-        ):
-
-            add_event(
-                "SR_BREAKOUT",
-                "BULLISH",
-                20,
-                "Completed candle closed above resistance zone.",
-            )
-
-        elif (
-            current["high"] > resistance_upper
-            and current["close"] < resistance_lower
-        ):
-
-            add_event(
-                "SR_REJECTION",
-                "BEARISH",
-                20,
-                "Price traded through resistance and closed below the zone.",
-            )
-
-        elif (
-            previous["close"] > resistance_upper
-            and current["low"] <= resistance_upper
-            and current["close"] > resistance_upper
-        ):
-
-            add_event(
-                "RETEST",
-                "BULLISH",
-                20,
-                "Broken resistance was retested and reclaimed.",
-            )
-
-    if nearest_support:
-
-        support_lower = _num(
-            nearest_support.get("lower")
-        )
-
-        support_upper = _num(
-            nearest_support.get("upper")
-        )
-
-        if (
-            current["close"]
-            < support_lower - breakout_buffer
-        ):
-
-            add_event(
-                "SR_BREAKOUT",
-                "BEARISH",
-                20,
-                "Completed candle closed below support zone.",
-            )
-
-        elif (
-            current["low"] < support_lower
-            and current["close"] > support_upper
-        ):
-
-            add_event(
-                "SR_REJECTION",
-                "BULLISH",
-                20,
-                "Price traded through support and closed above the zone.",
-            )
-
-        elif (
-            previous["close"] < support_lower
-            and current["high"] >= support_lower
-            and current["close"] < support_lower
-        ):
-
-            add_event(
-                "RETEST",
-                "BEARISH",
-                20,
-                "Broken support was retested and rejected.",
-            )
-
-    # ---------------------------------------------------------
-    # 8. STRUCTURE ALIGNMENT
-    # ---------------------------------------------------------
-
-    structure_bias = (
-        structure or {}
-    ).get(
-        "bias",
-        "NEUTRAL",
-    )
-
-    price_action_direction = "NEUTRAL"
-
-    if bullish_score > bearish_score:
-        price_action_direction = "BULLISH"
-
-    elif bearish_score > bullish_score:
-        price_action_direction = "BEARISH"
-
-    if structure_bias in (
-        "BULLISH",
-        "BEARISH",
-    ):
-
-        if price_action_direction == structure_bias:
-
-            add_event(
-                "STRUCTURE_ALIGNMENT",
-                price_action_direction,
-                10,
-                "Recent price action agrees with structural bias.",
-            )
-
-        elif (
-            price_action_direction != "NEUTRAL"
-        ):
-
-            warnings.append(
-                "Recent price action conflicts with structural bias."
-            )
-
-    # ---------------------------------------------------------
-    # 9. FINAL RESULT
-    # ---------------------------------------------------------
-
-    if bullish_score > bearish_score:
-
-        direction = "BULLISH"
-        raw_score = bullish_score - bearish_score
-
-    elif bearish_score > bullish_score:
-
-        direction = "BEARISH"
-        raw_score = bearish_score - bullish_score
-
-    else:
-
-        direction = "NEUTRAL"
-        raw_score = 0.0
-
-    score = min(
-        100.0,
-        max(
-            0.0,
-            raw_score * 2.5,
+    candidates.sort(
+        key=lambda z: _safe_float(
+            z.get("strength"),
+            0,
         ),
+        reverse=True,
     )
 
-    if direction == "NEUTRAL":
-        status = "NEUTRAL"
-
-    elif score >= 70:
-        status = "STRONG"
-
-    elif score >= 40:
-        status = "MODERATE"
-
-    else:
-        status = "WEAK"
+    zone = candidates[0]
 
     return {
-        "status": status,
-        "direction": direction,
-        "score": round(score, 2),
-        "atr": round(atr, 6),
+        "state": "ALIGNED",
+        "score": 15,
+        "zone": zone,
+    }
 
-        "current": {
-            **current,
-        },
 
-        "context": {
-            "prior_range_high": prior_high,
-            "prior_range_low": prior_low,
-            "average_range": round(
-                average_range,
-                6,
-            ),
-            "average_body": round(
-                average_body,
-                6,
-            ),
-            "structure_bias": structure_bias,
-            "nearest_support": nearest_support,
-            "nearest_resistance": nearest_resistance,
-        },
+# ---------------------------------------------------------
+# Main engine
+# ---------------------------------------------------------
 
-        "events": events[-10:],
+def analyze_price_action(
+    df,
+    sr=None,
+    structure=None,
+    direction=None,
+):
+    """
+    Price Action Engine V2.
+
+    Detects:
+    - candle quality
+    - momentum/displacement
+    - rejection
+    - engulfing
+    - breakout
+    - false breakout
+    - consolidation
+    - range expansion/contraction
+    - structure context
+    - S/R context
+
+    Important:
+    Individual candle patterns do NOT automatically
+    create a trade signal.
+    """
+
+    if df is None or len(df) < 30:
+        return {
+            "status": "INSUFFICIENT_DATA",
+            "direction": NEUTRAL,
+            "score": 0,
+            "patterns": [],
+            "reason": "Insufficient candles.",
+        }
+
+    last = df.iloc[-1]
+
+    candle = _candle_quality(last)
+    momentum = _momentum(df)
+    rejection = _rejection(last)
+    engulfing = _engulfing(df)
+    breakout = _breakout(df)
+    consolidation = _consolidation(df)
+    range_behavior = _range_behavior(df)
+
+    # If direction is not explicitly supplied,
+    # derive directional evidence from structure.
+    if direction not in (
+        BULLISH,
+        BEARISH,
+    ):
+        if structure:
+            direction = structure.get(
+                "bias",
+                NEUTRAL,
+            )
+
+    if direction not in (
+        BULLISH,
+        BEARISH,
+    ):
+        direction = NEUTRAL
+
+    # -----------------------------------------------------
+    # Evidence scoring
+    # -----------------------------------------------------
+
+    score = 0.0
+    evidence = []
+    warnings = []
+
+    # Structure
+    structure_result = _structure_context(
+        structure,
+        direction,
+    )
+
+    score += structure_result["score"]
+
+    if structure_result["state"] == "ALIGNED":
+        evidence.append(
+            "Price action is aligned with market structure."
+        )
+
+    elif structure_result["state"] == "CONFLICTING":
+        warnings.append(
+            "Price action is against market structure."
+        )
+
+    # Candle quality
+    if (
+        candle["direction"] == direction
+        and candle["quality"] == "STRONG"
+    ):
+        score += 15
+
+        evidence.append(
+            "Current candle has strong directional body."
+        )
+
+    # Momentum
+    if (
+        momentum["direction"] == direction
+        and momentum["state"] == "STRONG"
+    ):
+        score += 20
+
+        evidence.append(
+            "Current candle shows strong directional displacement."
+        )
+
+    elif (
+        momentum["direction"] == direction
+        and momentum["state"] == "MODERATE"
+    ):
+        score += 10
+
+        evidence.append(
+            "Current candle shows directional momentum."
+        )
+
+    # Rejection
+    if rejection["direction"] == direction:
+        score += 15
+
+        evidence.append(
+            "Current candle shows directional rejection."
+        )
+
+    elif (
+        rejection["direction"]
+        == (
+            BEARISH
+            if direction == BULLISH
+            else BULLISH
+        )
+    ):
+        score -= 10
+
+        warnings.append(
+            "Current candle shows rejection against direction."
+        )
+
+    # Engulfing
+    if engulfing["direction"] == direction:
+        score += 15
+
+        evidence.append(
+            "Current candle forms a directional engulfing pattern."
+        )
+
+    # Breakout
+    if breakout["direction"] == direction:
+
+        if breakout["state"] == "BREAKOUT":
+            score += 20
+
+            evidence.append(
+                "Price has broken the recent range in the "
+                "direction of the setup."
+            )
+
+        elif breakout["state"] == "FALSE_BREAKOUT":
+            score += 15
+
+            evidence.append(
+                "False breakout produced directional rejection."
+            )
+
+    # Opposing breakout
+    elif breakout["direction"] not in (
+        NEUTRAL,
+        direction,
+    ):
+        warnings.append(
+            "Recent range behaviour conflicts with direction."
+        )
+
+    # Consolidation
+    if consolidation["state"] == "CONSOLIDATION":
+        evidence.append(
+            "Market is currently in a relatively compressed range."
+        )
+
+    # Range expansion
+    if range_behavior["state"] == "EXPANSION":
+        evidence.append(
+            "Recent range is expanding."
+        )
+
+    elif range_behavior["state"] == "CONTRACTION":
+        warnings.append(
+            "Recent range is contracting."
+        )
+
+    # S/R
+    current_price = _safe_float(
+        last.get("close"),
+        None,
+    )
+
+    sr_result = _sr_context(
+        sr,
+        direction,
+        current_price,
+    )
+
+    score += sr_result["score"]
+
+    if sr_result["state"] == "ALIGNED":
+        evidence.append(
+            "Price action has directional S/R context."
+        )
+
+    # -----------------------------------------------------
+    # Normalize score
+    # -----------------------------------------------------
+
+    score = _clamp(
+        score,
+        0,
+        100,
+    )
+
+    # -----------------------------------------------------
+    # Determine directional PA
+    # -----------------------------------------------------
+
+    directional_evidence = 0
+
+    for item in (
+        momentum,
+        rejection,
+        engulfing,
+        breakout,
+    ):
+        if item.get("direction") == direction:
+            directional_evidence += 1
+
+    if score >= 65 and directional_evidence >= 2:
+        final_direction = direction
+        state = "CONFIRMING"
+
+    elif score >= 45 and directional_evidence >= 1:
+        final_direction = direction
+        state = "DEVELOPING"
+
+    else:
+        final_direction = NEUTRAL
+        state = "NEUTRAL"
+
+    # -----------------------------------------------------
+    # Final
+    # -----------------------------------------------------
+
+    return {
+        "status": "OK",
+
+        "direction": final_direction,
+
+        "score": round(
+            score,
+            2,
+        ),
+
+        "state": state,
+
+        "current_candle": candle,
+
+        "momentum": momentum,
+
+        "rejection": rejection,
+
+        "engulfing": engulfing,
+
+        "breakout": breakout,
+
+        "consolidation": consolidation,
+
+        "range_behavior": range_behavior,
+
+        "structure_context": structure_result,
+
+        "sr_context": sr_result,
+
+        "evidence": evidence,
 
         "warnings": warnings,
 
         "methodology": {
-            "type": "Deterministic completed-candle price action",
-            "lookahead": False,
-            "uses_future_candles": False,
-            "score_meaning": (
-                "Price-action evidence score, not win probability."
+            "type": (
+                "Context-aware deterministic "
+                "price action analysis"
             ),
+
+            "patterns_are_contextual": True,
+
+            "components": [
+                "Candle quality",
+                "Momentum",
+                "Displacement",
+                "Rejection",
+                "Engulfing",
+                "Breakout",
+                "False breakout",
+                "Consolidation",
+                "Range expansion/contraction",
+                "Structure context",
+                "S/R context",
+            ],
+
+            "signal_rule": (
+                "Individual candle patterns do not "
+                "automatically create a trade."
+            ),
+
             "prediction": "None",
+
+            "win_probability": (
+                "Not calculated"
+            ),
         },
     }
-
-
-def price_action(
-    df: pd.DataFrame,
-    sr: dict[str, Any] | None = None,
-    structure: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-
-    return analyze_price_action(
-        df,
-        sr=sr,
-        structure=structure,
-    )

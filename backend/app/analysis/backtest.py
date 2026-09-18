@@ -30,7 +30,11 @@ def backtest(df: pd.DataFrame, signal_fn, capital=10000, risk_pct=1,
         except Exception:
             continue
 
-        if not sig or sig.get("status") in ("NO TRADE", "Insufficient data"):
+        if (
+            not sig
+            or sig.get("status") in ("NO TRADE", "WAIT", "Insufficient data")
+            or not sig.get("decision", {}).get("entry_ready", False)
+        ):
             continue
         if sig.get("direction") not in ("LONG", "SHORT"):
             continue

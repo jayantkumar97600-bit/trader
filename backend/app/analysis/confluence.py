@@ -1,26 +1,43 @@
 from typing import Any
 
 
+BULLISH = "BULLISH"
+BEARISH = "BEARISH"
+NEUTRAL = "NEUTRAL"
+
+
 def _direction_to_bias(direction: str | None) -> str:
     if direction == "LONG":
-        return "BULLISH"
-
+        return BULLISH
     if direction == "SHORT":
-        return "BEARISH"
+        return BEARISH
+    return NEUTRAL
 
-    return "NEUTRAL"
+
+def _opposite(direction: str) -> str:
+    if direction == BULLISH:
+        return BEARISH
+    if direction == BEARISH:
+        return BULLISH
+    return NEUTRAL
 
 
-def _structure_direction(structure: dict[str, Any]) -> str:
-    bias = structure.get("bias", "NEUTRAL")
+def _structure_bias(structure: dict[str, Any] | None) -> str:
+    if not structure:
+        return NEUTRAL
 
-    if bias in ("BULLISH", "BEARISH"):
+    bias = structure.get("bias", NEUTRAL)
+
+    if bias in (BULLISH, BEARISH):
         return bias
 
-    return "NEUTRAL"
+    return NEUTRAL
 
 
-def _recent_sweep(liquidity: dict[str, Any]):
+def _latest_sweep(liquidity: dict[str, Any] | None):
+    if not liquidity:
+        return None
+
     sweeps = liquidity.get("sweeps", [])
 
     if not sweeps:
@@ -29,311 +46,475 @@ def _recent_sweep(liquidity: dict[str, Any]):
     return sweeps[-1]
 
 
-def analyze_confluence(
-    structures: dict[str, dict[str, Any]],
-    liquidity: dict[str, Any],
-    timeframe: str = "15m",
-):
-    """
-    Deterministic Structure + Liquidity Confluence Engine.
+def _get_sweep_direction(sweep: dict[str, Any] | None) -> str:
+    if not sweep:
+        return NEUTRAL
 
-    No prediction is made here.
+    direction = sweep.get("direction", NEUTRAL)
 
-    The engine only combines verified observations:
-        - timeframe structure
-        - liquidity location
-        - confirmed liquidity sweeps
+    if direction in (BULLISH, BEARISH):
+        return direction
 
-    Output is evidence, not probability.
-    """
+    return NEUTRAL
 
-    if not structures:
+
+def _get_price_action_direction(
+    price_action: dict[str, Any] | None,
+) -> str:
+    if not price_action:
+        return NEUTRAL
+
+    direction = price_action.get("direction", NEUTRAL)
+
+    if direction in (BULLISH, BEARISH):
+        return direction
+
+    return NEUTRAL
+
+
+def _get_sr_context(
+    levels: dict[str, Any] | None,
+    direction: str,
+) -> dict[str, Any]:
+    if not levels:
         return {
-            "bias": "NEUTRAL",
-            "status": "CONFLICTED",
+            "state": "NO_CONTEXT",
+            "zone": None,
+            "reason": "S/R data unavailable.",
+        }
+
+    zones = levels.get("relevant_zones", [])
+
+    if not zones:
+        return {
+            "state": "NO_CONTEXT",
+            "zone": None,
+            "reason": "No relevant S/R zone.",
+        }
+
+    # For LONG we prefer support.
+    # For SHORT we prefer resistance.
+    preferred = []
+
+    for zone in zones:
+        kind = str(zone.get("kind", "")).upper()
+
+        if direction == BULLISH and kind == "SUPPORT":
+            preferred.append(zone)
+
+        elif direction == BEARISH and kind == "RESISTANCE":
+            preferred.append(zone)
+
+    if not preferred:
+        return {
+            "state": "NEUTRAL",
+            "zone": None,
+            "reason": "Relevant zones exist but no directional S/R context.",
+        }
+
+    # Prefer strongest zone.
+    preferred.sort(
+        key=lambda z: float(z.get("strength", 0)),
+        reverse=True,
+    )
+
+    zone = preferred[0]
+
+    return {
+        "state": "ALIGNED",
+        "zone": zone,
+        "reason": (
+            "Price is interacting with directional "
+            "support/resistance context."
+        ),
+    }
+
+
+def _structure_event_alignment(
+    structure: dict[str, Any] | None,
+    direction: str,
+) -> dict[str, Any]:
+    if not structure:
+        return {
+            "state": "NO_DATA",
             "score": 0,
             "evidence": [],
-            "warnings": ["No structure data available."],
+        }
+
+    evidence = []
+    score = 0
+
+    bos = structure.get("bos", [])
+    choch = structure.get("choch", [])
+
+    if bos:
+        latest_bos = bos[-1]
+        bos_direction = latest_bos.get("direction", NEUTRAL)
+
+        if bos_direction == direction:
+            score += 10
+            evidence.append(
+                f"Latest BOS supports {direction.lower()} structure."
+            )
+
+    if choch:
+        latest_choch = choch[-1]
+        choch_direction = latest_choch.get(
+            "direction",
+            NEUTRAL,
+        )
+
+        if choch_direction == direction:
+            score += 5
+            evidence.append(
+                f"Latest CHoCH supports {direction.lower()} structure."
+            )
+
+    return {
+        "state": "ALIGNED" if score > 0 else "NEUTRAL",
+        "score": score,
+        "evidence": evidence,
+    }
+
+
+def analyze_confluence(
+    mtf: dict[str, Any] | None,
+    structures: dict[str, dict[str, Any]] | None = None,
+    liquidity: dict[str, Any] | None = None,
+    levels: dict[str, Any] | None = None,
+    price_action: dict[str, Any] | None = None,
+    timeframe: str = "15m",
+) -> dict[str, Any]:
+
+    structures = structures or {}
+
+    if not mtf:
+        return {
+            "status": "NO TRADE",
+            "bias": NEUTRAL,
+            "score": 0,
+            "evidence": [],
+            "warnings": [
+                "MTF analysis unavailable."
+            ],
         }
 
     # ---------------------------------------------------------
-    # STRUCTURE BIASES
+    # 1. AUTHORITATIVE MTF DIRECTION
     # ---------------------------------------------------------
 
-    structure_biases = {}
+    macro_bias = mtf.get("macro_bias", NEUTRAL)
 
-    for tf, structure in structures.items():
-        if structure is None:
-            continue
+    if macro_bias not in (BULLISH, BEARISH):
+        return {
+            "status": "NO TRADE",
+            "bias": NEUTRAL,
+            "score": 0,
+            "evidence": [],
+            "warnings": [
+                "No authoritative macro direction."
+            ],
+        }
 
-        structure_biases[tf] = _structure_direction(
-            structure
-        )
+    direction = macro_bias
 
-    bullish_count = sum(
-        x == "BULLISH"
-        for x in structure_biases.values()
-    )
-
-    bearish_count = sum(
-        x == "BEARISH"
-        for x in structure_biases.values()
-    )
-
-    # ---------------------------------------------------------
-    # STRUCTURE CONSENSUS
-    # ---------------------------------------------------------
-
-    if bullish_count > bearish_count:
-        structure_bias = "BULLISH"
-
-    elif bearish_count > bullish_count:
-        structure_bias = "BEARISH"
-
-    else:
-        structure_bias = "NEUTRAL"
-
-    # ---------------------------------------------------------
-    # LIQUIDITY
-    # ---------------------------------------------------------
-
-    recent_sweep = _recent_sweep(
-        liquidity
-    )
-
-    sweep_bias = "NEUTRAL"
-
-    if recent_sweep:
-        sweep_bias = recent_sweep.get(
-            "direction",
-            "NEUTRAL"
-        )
-
-    # ---------------------------------------------------------
-    # CONFLUENCE SCORING
-    # ---------------------------------------------------------
+    evidence = []
+    warnings = []
 
     score = 0
 
-    evidence = []
+    # ---------------------------------------------------------
+    # 2. MACRO STRUCTURE
+    # ---------------------------------------------------------
 
-    warnings = []
-
-    # Higher-timeframe structure.
-    htf_frames = [
-        tf for tf in ("4h", "1h")
-        if tf in structure_biases
-    ]
-
-    htf_bullish = sum(
-        structure_biases[tf] == "BULLISH"
-        for tf in htf_frames
-    )
-
-    htf_bearish = sum(
-        structure_biases[tf] == "BEARISH"
-        for tf in htf_frames
-    )
-
-    if htf_bullish > htf_bearish:
+    if macro_bias == direction:
         score += 25
-
         evidence.append(
-            "Higher-timeframe structure is bullish."
+            f"4H macro structure is {direction.lower()}."
         )
 
-    elif htf_bearish > htf_bullish:
-        score += 25
+    # ---------------------------------------------------------
+    # 3. 1H MAJOR STRUCTURE
+    # ---------------------------------------------------------
 
+    major_structure = mtf.get(
+        "major_structure",
+        NEUTRAL,
+    )
+
+    if major_structure == "ALIGNED":
+        score += 20
         evidence.append(
-            "Higher-timeframe structure is bearish."
+            "1H major structure agrees with macro direction."
         )
-
     else:
         warnings.append(
-            "Higher-timeframe structure is conflicted."
+            "1H major structure is not aligned."
         )
 
     # ---------------------------------------------------------
-    # SELECTED TIMEFRAME STRUCTURE
+    # 4. 15M SETUP
     # ---------------------------------------------------------
 
-    selected_structure = structures.get(
-        timeframe
+    setup_state = mtf.get(
+        "setup_state",
+        NEUTRAL,
     )
 
-    selected_bias = (
-        _structure_direction(
-            selected_structure
-        )
-        if selected_structure
-        else "NEUTRAL"
-    )
-
-    if selected_bias == structure_bias:
-        score += 20
-
+    if setup_state == "PULLBACK_ENDING_OR_RETEST":
+        score += 15
         evidence.append(
-            f"{timeframe} structure agrees with "
-            f"the broader structural bias."
+            "15M is in pullback/retest context."
         )
 
-    elif selected_bias != "NEUTRAL":
+    elif setup_state == "ALIGNED":
+        score += 15
+        evidence.append(
+            "15M setup is aligned with macro direction."
+        )
+
+    elif setup_state not in (NEUTRAL, None):
         warnings.append(
-            f"{timeframe} structure conflicts with "
-            f"the broader structural bias."
+            f"15M setup state: {setup_state}."
         )
 
     # ---------------------------------------------------------
-    # LIQUIDITY SWEEP
+    # 5. 5M ENTRY STATE
     # ---------------------------------------------------------
 
-    if recent_sweep:
+    entry_state = mtf.get(
+        "entry_state",
+        NEUTRAL,
+    )
 
-        if sweep_bias == structure_bias:
+    if entry_state in (
+        "RETEST",
+        "ENTRY_CONFIRMATION",
+        "CONFIRMED",
+    ):
+        score += 10
+        evidence.append(
+            f"5M entry state is {entry_state}."
+        )
+    else:
+        warnings.append(
+            f"5M entry confirmation is not complete: {entry_state}."
+        )
 
-            score += 30
+    # ---------------------------------------------------------
+    # 6. STRUCTURE EVENTS
+    # ---------------------------------------------------------
+
+    selected_structure = structures.get(timeframe)
+
+    event_result = _structure_event_alignment(
+        selected_structure,
+        direction,
+    )
+
+    score += event_result["score"]
+
+    evidence.extend(event_result["evidence"])
+
+    # ---------------------------------------------------------
+    # 7. LIQUIDITY
+    # ---------------------------------------------------------
+
+    sweep = _latest_sweep(liquidity)
+    sweep_direction = _get_sweep_direction(sweep)
+
+    liquidity_state = "NONE"
+
+    if sweep:
+        if sweep_direction == direction:
+            score += 15
+            liquidity_state = "ALIGNED"
 
             evidence.append(
                 "Recent confirmed liquidity sweep "
-                "agrees with structure."
+                "supports the directional bias."
+            )
+
+        elif sweep_direction == _opposite(direction):
+            liquidity_state = "CONFLICTING"
+
+            warnings.append(
+                "Recent liquidity sweep conflicts with "
+                "the macro direction."
             )
 
         else:
-
-            score += 5
-
-            warnings.append(
-                "Recent liquidity sweep conflicts "
-                "with structural bias."
-            )
+            liquidity_state = "NEUTRAL"
 
     else:
-
         warnings.append(
             "No confirmed recent liquidity sweep."
         )
 
     # ---------------------------------------------------------
-    # BOS / CHoCH
+    # 8. S/R CONTEXT
     # ---------------------------------------------------------
 
-    if selected_structure:
+    sr = _get_sr_context(
+        levels,
+        direction,
+    )
 
-        bos = selected_structure.get(
-            "bos",
-            []
+    sr_state = sr["state"]
+
+    if sr_state == "ALIGNED":
+        score += 10
+        evidence.append(
+            sr["reason"]
         )
 
-        choch = selected_structure.get(
-            "choch",
-            []
+    elif sr_state == "NO_CONTEXT":
+        warnings.append(
+            sr["reason"]
         )
 
-        if bos:
-
-            latest_bos = bos[-1]
-
-            bos_direction = latest_bos.get(
-                "direction",
-                "NEUTRAL"
-            )
-
-            if bos_direction == structure_bias:
-
-                score += 15
-
-                evidence.append(
-                    f"Latest {timeframe} BOS agrees "
-                    "with structural bias."
-                )
-
-        if choch:
-
-            latest_choch = choch[-1]
-
-            choch_direction = latest_choch.get(
-                "direction",
-                "NEUTRAL"
-            )
-
-            if choch_direction == structure_bias:
-
-                score += 10
-
-                evidence.append(
-                    f"Latest {timeframe} CHoCH agrees "
-                    "with structural bias."
-                )
-
     # ---------------------------------------------------------
-    # FINAL BIAS
+    # 9. PRICE ACTION
     # ---------------------------------------------------------
 
-    if structure_bias == "BULLISH":
-        final_bias = "BULLISH"
+    pa_direction = _get_price_action_direction(
+        price_action
+    )
 
-    elif structure_bias == "BEARISH":
-        final_bias = "BEARISH"
+    pa_score = float(
+        price_action.get("score", 0)
+        if price_action
+        else 0
+    )
+
+    price_action_state = "NEUTRAL"
+
+    if pa_direction == direction:
+        score += min(10, pa_score)
+        price_action_state = "ALIGNED"
+
+        evidence.append(
+            "Price action supports the directional bias."
+        )
+
+    elif pa_direction == _opposite(direction):
+        price_action_state = "CONFLICTING"
+
+        warnings.append(
+            "Price action currently conflicts with "
+            "the macro direction."
+        )
 
     else:
-        final_bias = "NEUTRAL"
+        warnings.append(
+            "Price action has no clear directional confirmation."
+        )
 
     # ---------------------------------------------------------
-    # STATUS
+    # FINAL SCORE
     # ---------------------------------------------------------
 
-    if final_bias == "NEUTRAL":
+    score = min(float(score), 100.0)
 
-        status = "CONFLICTED"
+    # ---------------------------------------------------------
+    # FINAL DECISION
+    # ---------------------------------------------------------
 
-    elif score >= 70:
+    mtf_decision = mtf.get(
+        "decision",
+        "WAIT_FOR_SETUP",
+    )
 
-        status = "STRONG_CONFLUENCE"
+    if mtf_decision == "NO TRADE":
+        status = "NO TRADE"
+
+    elif (
+        liquidity_state == "CONFLICTING"
+        or price_action_state == "CONFLICTING"
+    ):
+        status = "WAIT"
+
+    elif score >= 80:
+        status = "HIGH_CONFLUENCE"
+
+    elif score >= 65:
+        status = "GOOD_CONFLUENCE"
 
     elif score >= 50:
-
         status = "PARTIAL_CONFLUENCE"
 
     else:
-
         status = "WEAK_CONFLUENCE"
 
     # ---------------------------------------------------------
-    # FINAL OUTPUT
+    # ENTRY READINESS
     # ---------------------------------------------------------
 
+    entry_ready = (
+        mtf_decision == "ENTRY_CONFIRMATION_POSSIBLE"
+        and score >= 65
+        and liquidity_state != "CONFLICTING"
+        and price_action_state != "CONFLICTING"
+    )
+
+    if entry_ready:
+        entry_status = "CONFIRMATION_READY"
+    else:
+        entry_status = "WAIT"
+
     return {
-        "bias": final_bias,
-
         "status": status,
+        "bias": direction,
+        "score": round(score, 2),
 
-        "score": min(score, 100),
+        "entry_ready": entry_ready,
+        "entry_status": entry_status,
 
-        "structure_bias": structure_bias,
+        "mtf": {
+            "macro_bias": macro_bias,
+            "major_structure": major_structure,
+            "setup_state": setup_state,
+            "entry_state": entry_state,
+            "decision": mtf_decision,
+        },
 
-        "structure_timeframes": structure_biases,
+        "liquidity": {
+            "state": liquidity_state,
+            "recent_sweep": sweep,
+            "direction": sweep_direction,
+        },
 
-        "liquidity_sweep": recent_sweep,
+        "sr": {
+            "state": sr_state,
+            "zone": sr.get("zone"),
+        },
+
+        "price_action": {
+            "state": price_action_state,
+            "direction": pa_direction,
+            "score": pa_score,
+        },
+
+        "structure_events": event_result,
 
         "evidence": evidence,
-
         "warnings": warnings,
 
         "methodology": {
-            "type":
-                "Deterministic evidence combination",
-
-            "score_meaning":
-                "Confluence evidence score, not win probability",
-
-            "liquidity":
-                "Confirmed sweep only",
-
-            "structure":
-                "Confirmed swing structure",
-
-            "prediction":
-                "None",
+            "type": "Deterministic multi-layer confluence",
+            "direction_source": "4H macro structure",
+            "hierarchy": "4H -> 1H -> 15M -> 5M",
+            "components": [
+                "MTF structure",
+                "Liquidity",
+                "Support/Resistance",
+                "Price Action",
+                "BOS/CHoCH",
+            ],
+            "score_meaning": (
+                "Confluence evidence score, not win probability."
+            ),
+            "prediction": "None",
+            "win_probability": "Not calculated",
         },
     }

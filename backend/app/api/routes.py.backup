@@ -56,7 +56,7 @@ def getdf(name=None, timeframe="15m", asset="XAUUSD", limit=5000):
     if name:
         p = Path(name)
         if not p.is_absolute():
-            p = DATA / p
+            p = DATA / p.name
     else:
         try:
             p = timeframe_path(DATA, timeframe, asset)
@@ -135,23 +135,6 @@ def make_signal(df, req):
     # Analyze structure independently on every available timeframe
     structure_by_tf = {}
 
-
-
-    for tf, frame_df in frames.items():
-
-        if frame_df is None or len(frame_df) < 60:
-            continue
-
-        frame_with_indicators = add_indicators(
-            frame_df.copy()
-        )
-
-        structure_by_tf[tf] = analyze_structure(
-            frame_with_indicators
-        )
-
-
-    # Analyze 5M price action after structure calculation
     five_minute_pa = None
 
     five_minute_df = frames.get("5m")
@@ -165,6 +148,19 @@ def make_signal(df, req):
             five_minute_with_indicators,
             sr=levels,
             structure=structure_by_tf.get("5m"),
+        )
+
+    for tf, frame_df in frames.items():
+
+        if frame_df is None or len(frame_df) < 60:
+            continue
+
+        frame_with_indicators = add_indicators(
+            frame_df.copy()
+        )
+
+        structure_by_tf[tf] = analyze_structure(
+            frame_with_indicators
         )
 
     # ============================================================
@@ -183,7 +179,7 @@ def make_signal(df, req):
         mtf=mtf,
         structure=structure_by_tf.get("5m"),
         liquidity=liquidity,
-        price_action=five_minute_pa or pa,
+        price_action=pa,
     )
 
     setup = generate_setup(
@@ -206,7 +202,7 @@ def make_signal(df, req):
         confluence=confluence,
         entry_confirmation=entry_confirmation,
         setup=setup,
-        price_action=five_minute_pa or pa,
+        price_action=pa,
         min_rr=req.min_rr,
     )
 
@@ -236,7 +232,6 @@ def make_signal(df, req):
             "liquidity": liquidity,
             "levels": levels,
             "price_action": pa,
-
             "data_source": "MT5 historical CSV",
             "timeframe": req.timeframe,
         }
@@ -541,7 +536,6 @@ def make_signal(df, req):
         "decision": decision,
 
         "price_action": pa,
-        "five_minute_price_action": five_minute_pa,
 
         "candlesticks": cps[-8:],
 
@@ -669,3 +663,4 @@ def journal(req: JournalRequest): return add_trade(req.model_dump())
 
 @router.get("/journal")
 def journal_list(): return list_trades()
+

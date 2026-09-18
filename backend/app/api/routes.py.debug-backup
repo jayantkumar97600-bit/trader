@@ -135,7 +135,7 @@ def make_signal(df, req):
     # Analyze structure independently on every available timeframe
     structure_by_tf = {}
 
-
+    
 
     for tf, frame_df in frames.items():
 
@@ -236,7 +236,7 @@ def make_signal(df, req):
             "liquidity": liquidity,
             "levels": levels,
             "price_action": pa,
-
+            
             "data_source": "MT5 historical CSV",
             "timeframe": req.timeframe,
         }
@@ -669,3 +669,5 @@ def journal(req: JournalRequest): return add_trade(req.model_dump())
 
 @router.get("/journal")
 def journal_list(): return list_trades()
+
+

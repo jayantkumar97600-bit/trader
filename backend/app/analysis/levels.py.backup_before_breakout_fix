@@ -706,7 +706,7 @@ def _process_zone_lifecycle(
         )
 
         breakout_price = _safe_float(
-            close[
+            closes[
                 first_position
             ]
         )

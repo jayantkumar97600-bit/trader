@@ -188,3 +188,41 @@ def test_short_gap_beyond_stop_is_rejected():
 
     assert result["total_trades"] == 0
 
+
+def test_backtest_applies_commission():
+    df = make_data(rows=160, target_indices=[130])
+
+    result = backtest(
+        df,
+        ready_signal,
+        capital=10000,
+        risk_pct=1,
+        commission_bps=10,
+        slippage=0,
+        max_bars=100,
+        step=1,
+    )
+
+    assert result["total_trades"] >= 1
+    assert result["trades"][0]["fees"] > 0
+    assert result["trades"][0]["result"] < result["trades"][0]["gross_result"]
+
+
+def test_backtest_applies_slippage():
+    df = make_data(rows=160, target_indices=[130])
+
+    result = backtest(
+        df,
+        ready_signal,
+        capital=10000,
+        risk_pct=1,
+        commission_bps=0,
+        slippage=0.1,
+        max_bars=100,
+        step=1,
+    )
+
+    assert result["total_trades"] >= 1
+    assert result["trades"][0]["slippage_cost"] > 0
+    assert result["trades"][0]["result"] < result["trades"][0]["gross_result"]
+

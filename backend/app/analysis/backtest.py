@@ -79,6 +79,27 @@ def backtest(
             except (KeyError, TypeError, ValueError):
                 pass
 
+        direction = sig["direction"]
+
+        # Validate gap execution against SL/TP levels.
+        gap_exit_price = None
+        gap_exit_reason = None
+
+        if direction == "LONG":
+            if entry <= sl:
+                i += evaluation_step
+                continue
+            if entry >= tp:
+                gap_exit_price = entry
+                gap_exit_reason = "TAKE_PROFIT_GAP"
+        else:
+            if entry >= sl:
+                i += evaluation_step
+                continue
+            if entry <= tp:
+                gap_exit_price = entry
+                gap_exit_reason = "TAKE_PROFIT_GAP"
+
         stop_dist = abs(entry - sl)
 
         if not math.isfinite(stop_dist) or stop_dist <= 0:
@@ -87,14 +108,18 @@ def backtest(
 
         risk = balance * float(risk_pct) / 100.0
         qty = risk / stop_dist
-        direction = sig["direction"]
-
         exit_price = None
         gross_result = None
         exit_index = None
         exit_reason = None
 
-        # Simulate the active position.
+        if gap_exit_price is not None:
+            exit_price = gap_exit_price
+            gross_result = risk * abs(exit_price - entry) / stop_dist
+            exit_index = execution_index
+            exit_reason = gap_exit_reason
+
+        # Simulate the active position only when no gap exit occurred.
         # No new signal is evaluated until this position closes.
         for j in range(i + 1, min(i + 201, len(work))):
             bar = work.iloc[j]

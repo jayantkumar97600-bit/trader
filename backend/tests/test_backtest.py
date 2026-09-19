@@ -117,3 +117,74 @@ def test_backtest_handles_gap_at_entry():
     assert "trades" in result
     assert result["total_trades"] >= 1
     assert result["trades"][0]["entry"] == 100.8
+
+def test_long_gap_beyond_stop_is_rejected():
+    df = make_data(rows=160)
+
+    def gap_signal(part):
+        return {
+            "status": "READY",
+            "direction": "LONG",
+            "entry": 100.0,
+            "stop_loss": 99.0,
+            "take_profit_1": 101.0,
+            "decision": {"entry_ready": True},
+        }
+
+    df.loc[121, "open"] = 98.0
+
+    result = backtest(
+        df, gap_signal, capital=10000,
+        risk_pct=1, max_bars=100, step=1
+    )
+
+    assert result["total_trades"] == 0
+
+
+def test_long_gap_beyond_target_closes_immediately():
+    df = make_data(rows=160)
+
+    def gap_signal(part):
+        return {
+            "status": "READY",
+            "direction": "LONG",
+            "entry": 100.0,
+            "stop_loss": 99.0,
+            "take_profit_1": 101.0,
+            "decision": {"entry_ready": True},
+        }
+
+    df.loc[121, "open"] = 102.0
+
+    result = backtest(
+        df, gap_signal, capital=10000,
+        risk_pct=1, max_bars=100, step=1
+    )
+
+    assert result["total_trades"] >= 1
+    assert result["trades"][0]["entry"] == 102.0
+    assert result["trades"][0]["exit_reason"] == "TAKE_PROFIT_GAP"
+
+
+def test_short_gap_beyond_stop_is_rejected():
+    df = make_data(rows=160)
+
+    def gap_signal(part):
+        return {
+            "status": "READY",
+            "direction": "SHORT",
+            "entry": 100.0,
+            "stop_loss": 101.0,
+            "take_profit_1": 99.0,
+            "decision": {"entry_ready": True},
+        }
+
+    df.loc[121, "open"] = 102.0
+
+    result = backtest(
+        df, gap_signal, capital=10000,
+        risk_pct=1, max_bars=100, step=1
+    )
+
+    assert result["total_trades"] == 0
+

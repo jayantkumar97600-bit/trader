@@ -121,52 +121,53 @@ def backtest(
 
         # Simulate the active position only when no gap exit occurred.
         # No new signal is evaluated until this position closes.
-        for j in range(i + 1, min(i + 201, len(work))):
-            bar = work.iloc[j]
+        if gap_exit_price is None:
+            for j in range(i + 1, min(i + 201, len(work))):
+                bar = work.iloc[j]
 
-            try:
-                bar_high = float(bar["high"])
-                bar_low = float(bar["low"])
-            except (KeyError, TypeError, ValueError):
-                continue
+                try:
+                    bar_high = float(bar["high"])
+                    bar_low = float(bar["low"])
+                except (KeyError, TypeError, ValueError):
+                    continue
 
-            if direction == "LONG":
-                # Conservative assumption:
-                # Stop Loss is checked before Take Profit.
-                if bar_low <= sl:
-                    exit_price = sl
-                    gross_result = -risk
-                    exit_index = j
-                    exit_reason = "STOP_LOSS"
-                    break
+                if direction == "LONG":
+                    # Conservative assumption:
+                    # Stop Loss is checked before Take Profit.
+                    if bar_low <= sl:
+                        exit_price = sl
+                        gross_result = -risk
+                        exit_index = j
+                        exit_reason = "STOP_LOSS"
+                        break
 
-                if bar_high >= tp:
-                    exit_price = tp
-                    gross_result = (
-                        risk * abs(tp - entry) / stop_dist
-                    )
-                    exit_index = j
-                    exit_reason = "TAKE_PROFIT"
-                    break
+                    if bar_high >= tp:
+                        exit_price = tp
+                        gross_result = (
+                            risk * abs(tp - entry) / stop_dist
+                        )
+                        exit_index = j
+                        exit_reason = "TAKE_PROFIT"
+                        break
 
-            else:
-                # Conservative assumption:
-                # Stop Loss is checked before Take Profit.
-                if bar_high >= sl:
-                    exit_price = sl
-                    gross_result = -risk
-                    exit_index = j
-                    exit_reason = "STOP_LOSS"
-                    break
+                else:
+                    # Conservative assumption:
+                    # Stop Loss is checked before Take Profit.
+                    if bar_high >= sl:
+                        exit_price = sl
+                        gross_result = -risk
+                        exit_index = j
+                        exit_reason = "STOP_LOSS"
+                        break
 
-                if bar_low <= tp:
-                    exit_price = tp
-                    gross_result = (
-                        risk * abs(tp - entry) / stop_dist
-                    )
-                    exit_index = j
-                    exit_reason = "TAKE_PROFIT"
-                    break
+                    if bar_low <= tp:
+                        exit_price = tp
+                        gross_result = (
+                            risk * abs(tp - entry) / stop_dist
+                        )
+                        exit_index = j
+                        exit_reason = "TAKE_PROFIT"
+                        break
 
         # If the position did not close, stop this simulation path.
         if exit_price is None or exit_index is None:

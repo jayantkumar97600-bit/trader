@@ -226,3 +226,35 @@ def test_backtest_applies_slippage():
     assert result["trades"][0]["slippage_cost"] > 0
     assert result["trades"][0]["result"] < result["trades"][0]["gross_result"]
 
+
+def test_short_take_profit_generates_positive_profit():
+    df = make_data(rows=160)
+
+    def short_signal(part):
+        return {
+            "status": "READY",
+            "direction": "SHORT",
+            "entry": 100.0,
+            "stop_loss": 101.0,
+            "take_profit_1": 99.0,
+            "decision": {"entry_ready": True},
+        }
+
+    df.loc[121, "open"] = 100.0
+    df.loc[121, "low"] = 98.5
+
+    result = backtest(
+        df,
+        short_signal,
+        capital=10000,
+        risk_pct=1,
+        commission_bps=0,
+        slippage=0,
+        max_bars=100,
+        step=1,
+    )
+
+    assert result["total_trades"] >= 1
+    assert result["trades"][0]["gross_result"] > 0
+    assert result["trades"][0]["exit_reason"] == "TAKE_PROFIT"
+

@@ -66,6 +66,19 @@ def backtest(
             i += evaluation_step
             continue
 
+        # Use the next candle open as the realistic execution price.
+        # If the open is unavailable or invalid, retain the signal entry.
+        execution_index = i + 1
+
+        if execution_index < len(work):
+            try:
+                market_open = float(work.iloc[execution_index]["open"])
+
+                if math.isfinite(market_open) and market_open > 0:
+                    entry = market_open
+            except (KeyError, TypeError, ValueError):
+                pass
+
         stop_dist = abs(entry - sl)
 
         if not math.isfinite(stop_dist) or stop_dist <= 0:

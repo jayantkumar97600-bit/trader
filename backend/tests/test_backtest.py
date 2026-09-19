@@ -1,4 +1,4 @@
-﻿import pandas as pd
+import pandas as pd
 
 from app.analysis.backtest import backtest
 
@@ -100,9 +100,9 @@ def test_backtest_handles_gap_at_entry():
             "decision": {"entry_ready": True},
         }
 
-    df.loc[61, "open"] = 100.8
-    df.loc[61, "high"] = 101.2
-    df.loc[61, "low"] = 100.7
+    df.loc[121, "open"] = 100.8
+    df.loc[121, "high"] = 101.2
+    df.loc[121, "low"] = 100.7
 
     result = backtest(
         df,
@@ -115,3 +115,5 @@ def test_backtest_handles_gap_at_entry():
 
     assert isinstance(result, dict)
     assert "trades" in result
+    assert result["total_trades"] >= 1
+    assert result["trades"][0]["entry"] == 100.8

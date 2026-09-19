@@ -1,4 +1,3 @@
-@"
 # Python
 __pycache__/
 *.py[cod]
@@ -30,23 +29,17 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
-"@ | Set-Content .gitignore
-
-Add-Content .gitignore "`n# Large trading datasets`ndata/mt5/XAUUSD_M1.csv`ndata/mt5/XAUUSD_M3.csv`ndata/mt5/XAUUSD_M5.csv`n`n# Local trading database`nbackend/trading.db`n"
-# Large trading datasets
-data/mt5/XAUUSD_M1.csv
-data/mt5/XAUUSD_M3.csv
-data/mt5/XAUUSD_M5.csv
-
-# Local database
-backend/trading.db
-
 
 # Large trading datasets
 data/mt5/XAUUSD_M1.csv
 data/mt5/XAUUSD_M3.csv
 data/mt5/XAUUSD_M5.csv
+data/mt5/XAUUSD_M15.csv
+data/mt5/XAUUSD_M30.csv
+data/mt5/XAUUSD_H1.csv
+data/mt5/XAUUSD_H4.csv
+data/mt5/XAUUSD_D1.csv
+data/mt5/XAUUSD_W1.csv
 
 # Local database
 backend/trading.db
-

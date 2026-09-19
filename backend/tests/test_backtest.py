@@ -419,3 +419,35 @@ def test_backtest_average_metrics_are_numeric():
     assert isinstance(result["average_win"], float)
     assert isinstance(result["average_loss"], float)
 
+
+
+def test_backtest_v9_metrics_are_present():
+    df = make_data(rows=160, target_indices=[130, 150])
+
+    result = backtest(
+        df,
+        ready_signal,
+        capital=10000,
+        risk_pct=1,
+        commission_bps=0,
+        slippage=0,
+        max_bars=100,
+        step=1,
+    )
+
+    assert "net_profit" in result
+    assert "expectancy" in result
+    assert "average_r_multiple" in result
+    assert "max_drawdown_amount" in result
+    assert "recovery_factor" in result
+
+    assert result["net_profit"] == (
+        result["final_balance"] - 10000
+    )
+
+    assert isinstance(result["expectancy"], float)
+    assert isinstance(result["average_r_multiple"], float)
+
+    for trade in result["trades"]:
+        assert "risk_amount" in trade
+        assert "r_multiple" in trade

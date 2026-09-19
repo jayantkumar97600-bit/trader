@@ -196,6 +196,8 @@ def backtest(
             "exit_price": float(exit_price),
             "direction": direction,
             "quantity": float(qty),
+            "risk_amount": float(risk),
+            "r_multiple": float(gross_result / risk) if risk else 0.0,
             "gross_result": float(gross_result),
             "fees": float(fees),
             "slippage_cost": float(slippage_cost),
@@ -277,6 +279,27 @@ def backtest(
             max_consecutive_losses, current_losses
         )
 
+    # V9 risk-adjusted performance metrics.
+    net_profit = balance - float(capital)
+
+    expectancy = (
+        sum(trade["result"] for trade in trades) / len(trades)
+        if trades else 0.0
+    )
+
+    average_r_multiple = (
+        sum(trade["r_multiple"] for trade in trades) / len(trades)
+        if trades else 0.0
+    )
+
+    max_drawdown_amount = max_dd * float(capital)
+
+    recovery_factor = (
+        net_profit / max_drawdown_amount
+        if max_drawdown_amount > 0
+        else None
+    )
+
     return {
         "total_trades": len(trades),
         "winning_trades": len(wins),
@@ -305,5 +328,14 @@ def backtest(
         "average_loss": float(average_loss),
         "max_consecutive_wins": max_consecutive_wins,
         "max_consecutive_losses": max_consecutive_losses,
+        "net_profit": float(net_profit),
+        "expectancy": float(expectancy),
+        "average_r_multiple": float(average_r_multiple),
+        "max_drawdown_amount": float(max_drawdown_amount),
+        "recovery_factor": (
+            float(recovery_factor)
+            if recovery_factor is not None
+            else None
+        ),
         "trades": trades,
     }

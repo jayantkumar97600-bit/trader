@@ -300,6 +300,62 @@ def backtest(
         else None
     )
 
+    # V11 session-wise performance analytics.
+    def get_session(timestamp):
+        if pd.isna(timestamp):
+            return "UNKNOWN"
+
+        hour = timestamp.hour
+
+        if 0 <= hour < 8:
+            return "ASIAN"
+        if 8 <= hour < 13:
+            return "LONDON"
+        if 13 <= hour < 21:
+            return "NEW_YORK"
+
+        return "OTHER"
+
+    session_stats = {
+        "ASIAN": {"trades": 0, "wins": 0, "losses": 0, "net_profit": 0.0},
+        "LONDON": {"trades": 0, "wins": 0, "losses": 0, "net_profit": 0.0},
+        "NEW_YORK": {"trades": 0, "wins": 0, "losses": 0, "net_profit": 0.0},
+        "OTHER": {"trades": 0, "wins": 0, "losses": 0, "net_profit": 0.0},
+        "UNKNOWN": {"trades": 0, "wins": 0, "losses": 0, "net_profit": 0.0},
+    }
+
+    for trade in trades:
+        entry_index = trade["entry_index"]
+        session = "UNKNOWN"
+
+        if "timestamp" in work.columns:
+            try:
+                timestamp = pd.to_datetime(
+                    work.iloc[entry_index]["timestamp"],
+                    utc=True,
+                    errors="coerce",
+                )
+                session = get_session(timestamp)
+            except (IndexError, KeyError, TypeError, ValueError):
+                session = "UNKNOWN"
+
+        stats = session_stats[session]
+        stats["trades"] += 1
+        stats["net_profit"] += float(trade["result"])
+
+        if trade["result"] > 0:
+            stats["wins"] += 1
+        else:
+            stats["losses"] += 1
+
+    for stats in session_stats.values():
+        stats["win_rate"] = (
+            stats["wins"] / stats["trades"] * 100
+            if stats["trades"] else 0.0
+        )
+        stats["net_profit"] = float(stats["net_profit"])
+        stats["win_rate"] = float(stats["win_rate"])
+
     # V10 trade analytics.
     long_trades = [
         trade for trade in trades
@@ -411,4 +467,5 @@ def backtest(
         "average_winning_duration": float(average_winning_duration),
         "average_losing_duration": float(average_losing_duration),
         "average_quantity": float(average_quantity),
+        "session_stats": session_stats,
     }

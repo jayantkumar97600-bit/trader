@@ -451,3 +451,48 @@ def test_backtest_v9_metrics_are_present():
     for trade in result["trades"]:
         assert "risk_amount" in trade
         assert "r_multiple" in trade
+
+
+def test_backtest_v11_session_stats_are_present():
+    df = make_data(rows=160, target_indices=[130, 150])
+
+    df["timestamp"] = pd.date_range(
+        "2026-01-01",
+        periods=len(df),
+        freq="15min",
+        tz="UTC",
+    )
+
+    result = backtest(
+        df,
+        ready_signal,
+        capital=10000,
+        risk_pct=1,
+        commission_bps=0,
+        slippage=0,
+        max_bars=100,
+        step=1,
+    )
+
+    assert "session_stats" in result
+
+    sessions = result["session_stats"]
+
+    assert "ASIAN" in sessions
+    assert "LONDON" in sessions
+    assert "NEW_YORK" in sessions
+    assert "OTHER" in sessions
+    assert "UNKNOWN" in sessions
+
+    total_session_trades = sum(
+        stats["trades"]
+        for stats in sessions.values()
+    )
+
+    assert total_session_trades == result["total_trades"]
+
+    for stats in sessions.values():
+        assert "wins" in stats
+        assert "losses" in stats
+        assert "net_profit" in stats
+        assert "win_rate" in stats

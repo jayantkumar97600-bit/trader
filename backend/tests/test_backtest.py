@@ -85,3 +85,33 @@ def test_backtest_handles_no_trade_signal():
     assert result["total_trades"] == 0
 
 
+
+
+def test_backtest_handles_gap_at_entry():
+    df = make_data(rows=160, target_indices=[70])
+
+    def gap_signal(part):
+        return {
+            "status": "READY",
+            "direction": "LONG",
+            "entry": 100.0,
+            "stop_loss": 99.0,
+            "take_profit_1": 101.0,
+            "decision": {"entry_ready": True},
+        }
+
+    df.loc[61, "open"] = 100.8
+    df.loc[61, "high"] = 101.2
+    df.loc[61, "low"] = 100.7
+
+    result = backtest(
+        df,
+        gap_signal,
+        capital=10000,
+        risk_pct=1,
+        max_bars=100,
+        step=1,
+    )
+
+    assert isinstance(result, dict)
+    assert "trades" in result

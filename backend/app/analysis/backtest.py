@@ -300,6 +300,70 @@ def backtest(
         else None
     )
 
+    # V10 trade analytics.
+    long_trades = [
+        trade for trade in trades
+        if trade["direction"] == "LONG"
+    ]
+
+    short_trades = [
+        trade for trade in trades
+        if trade["direction"] == "SHORT"
+    ]
+
+    exit_reason_breakdown = {}
+
+    for trade in trades:
+        reason = trade["exit_reason"] or "UNKNOWN"
+        exit_reason_breakdown[reason] = (
+            exit_reason_breakdown.get(reason, 0) + 1
+        )
+
+    trade_durations = [
+        trade["exit_index"] - trade["entry_index"]
+        for trade in trades
+    ]
+
+    winning_durations = [
+        trade["exit_index"] - trade["entry_index"]
+        for trade in trades
+        if trade["result"] > 0
+    ]
+
+    losing_durations = [
+        trade["exit_index"] - trade["entry_index"]
+        for trade in trades
+        if trade["result"] <= 0
+    ]
+
+    average_trade_duration = (
+        sum(trade_durations) / len(trade_durations)
+        if trade_durations else 0.0
+    )
+
+    average_winning_duration = (
+        sum(winning_durations) / len(winning_durations)
+        if winning_durations else 0.0
+    )
+
+    average_losing_duration = (
+        sum(losing_durations) / len(losing_durations)
+        if losing_durations else 0.0
+    )
+
+    average_quantity = (
+        sum(trade["quantity"] for trade in trades) / len(trades)
+        if trades else 0.0
+    )
+
+    long_net_profit = sum(
+        trade["result"] for trade in long_trades
+    )
+
+    short_net_profit = sum(
+        trade["result"] for trade in short_trades
+    )
+
     return {
         "total_trades": len(trades),
         "winning_trades": len(wins),
@@ -338,4 +402,13 @@ def backtest(
             else None
         ),
         "trades": trades,
+        "long_trades": len(long_trades),
+        "short_trades": len(short_trades),
+        "long_net_profit": float(long_net_profit),
+        "short_net_profit": float(short_net_profit),
+        "exit_reason_breakdown": exit_reason_breakdown,
+        "average_trade_duration": float(average_trade_duration),
+        "average_winning_duration": float(average_winning_duration),
+        "average_losing_duration": float(average_losing_duration),
+        "average_quantity": float(average_quantity),
     }

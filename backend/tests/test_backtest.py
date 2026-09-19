@@ -258,3 +258,103 @@ def test_short_take_profit_generates_positive_profit():
     assert result["trades"][0]["gross_result"] > 0
     assert result["trades"][0]["exit_reason"] == "TAKE_PROFIT"
 
+
+def test_backtest_profit_factor_is_calculated_correctly():
+    df = make_data(rows=160, target_indices=[130, 150])
+
+    result = backtest(
+        df,
+        ready_signal,
+        capital=10000,
+        risk_pct=1,
+        commission_bps=0,
+        slippage=0,
+        max_bars=100,
+        step=1,
+    )
+
+    trades = result["trades"]
+
+    gross_win = sum(
+        trade["result"] for trade in trades
+        if trade["result"] > 0
+    )
+
+    gross_loss = abs(sum(
+        trade["result"] for trade in trades
+        if trade["result"] <= 0
+    ))
+
+    expected_factor = (
+        gross_win / gross_loss
+        if gross_loss > 0
+        else None
+    )
+
+    assert result["profit_factor"] == expected_factor
+
+
+def test_backtest_drawdown_is_valid_percentage():
+    df = make_data(rows=160, target_indices=[130, 150])
+
+    result = backtest(
+        df,
+        ready_signal,
+        capital=10000,
+        risk_pct=1,
+        commission_bps=0,
+        slippage=0,
+        max_bars=100,
+        step=1,
+    )
+
+    assert result["max_drawdown"] >= 0
+    assert result["max_drawdown"] <= 100
+
+
+def test_backtest_net_return_matches_final_balance():
+    capital = 10000
+
+    df = make_data(rows=160, target_indices=[130, 150])
+
+    result = backtest(
+        df,
+        ready_signal,
+        capital=capital,
+        risk_pct=1,
+        commission_bps=0,
+        slippage=0,
+        max_bars=100,
+        step=1,
+    )
+
+    expected_return = (
+        (result["final_balance"] / capital) - 1
+    ) * 100
+
+    assert abs(
+        result["net_return"] - expected_return
+    ) < 1e-9
+
+
+def test_backtest_trade_accounting_is_consistent():
+    df = make_data(rows=160, target_indices=[130, 150])
+
+    result = backtest(
+        df,
+        ready_signal,
+        capital=10000,
+        risk_pct=1,
+        commission_bps=0,
+        slippage=0,
+        max_bars=100,
+        step=1,
+    )
+
+    assert (
+        result["winning_trades"] +
+        result["losing_trades"]
+    ) == result["total_trades"]
+
+    assert result["final_balance"] > 0
+

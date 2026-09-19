@@ -420,6 +420,69 @@ def backtest(
         trade["result"] for trade in short_trades
     )
 
+    # V12 trade quality metrics.
+    winning_results = [
+        trade["result"] for trade in trades
+        if trade["result"] > 0
+    ]
+
+    losing_results = [
+        trade["result"] for trade in trades
+        if trade["result"] <= 0
+    ]
+
+    best_trade = max(
+        (trade["result"] for trade in trades),
+        default=0.0,
+    )
+
+    worst_trade = min(
+        (trade["result"] for trade in trades),
+        default=0.0,
+    )
+
+    long_win_rate = (
+        sum(1 for trade in long_trades if trade["result"] > 0)
+        / len(long_trades) * 100
+        if long_trades else 0.0
+    )
+
+    short_win_rate = (
+        sum(1 for trade in short_trades if trade["result"] > 0)
+        / len(short_trades) * 100
+        if short_trades else 0.0
+    )
+
+    average_winning_trade = (
+        sum(winning_results) / len(winning_results)
+        if winning_results else 0.0
+    )
+
+    average_losing_trade = (
+        abs(sum(losing_results) / len(losing_results))
+        if losing_results else 0.0
+    )
+
+    profit_loss_ratio = (
+        average_winning_trade / average_losing_trade
+        if average_losing_trade > 0
+        else None
+    )
+
+    sorted_durations = sorted(trade_durations)
+
+    median_trade_duration = (
+        sorted_durations[len(sorted_durations) // 2]
+        if sorted_durations and len(sorted_durations) % 2 == 1
+        else (
+            (
+                sorted_durations[len(sorted_durations) // 2 - 1]
+                + sorted_durations[len(sorted_durations) // 2]
+            ) / 2
+            if sorted_durations else 0.0
+        )
+    )
+
     return {
         "total_trades": len(trades),
         "winning_trades": len(wins),
@@ -467,5 +530,17 @@ def backtest(
         "average_winning_duration": float(average_winning_duration),
         "average_losing_duration": float(average_losing_duration),
         "average_quantity": float(average_quantity),
+        "best_trade": float(best_trade),
+        "worst_trade": float(worst_trade),
+        "long_win_rate": float(long_win_rate),
+        "short_win_rate": float(short_win_rate),
+        "average_winning_trade": float(average_winning_trade),
+        "average_losing_trade": float(average_losing_trade),
+        "profit_loss_ratio": (
+            float(profit_loss_ratio)
+            if profit_loss_ratio is not None
+            else None
+        ),
+        "median_trade_duration": float(median_trade_duration),
         "session_stats": session_stats,
     }

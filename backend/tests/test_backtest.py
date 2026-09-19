@@ -358,3 +358,64 @@ def test_backtest_trade_accounting_is_consistent():
 
     assert result["final_balance"] > 0
 
+
+def test_backtest_v8_risk_metrics_exist():
+    df = make_data(rows=160, target_indices=[130, 150])
+
+    result = backtest(
+        df,
+        ready_signal,
+        capital=10000,
+        risk_pct=1,
+        commission_bps=0,
+        slippage=0,
+        max_bars=100,
+        step=1,
+    )
+
+    assert "equity_curve" in result
+    assert "average_win" in result
+    assert "average_loss" in result
+    assert "max_consecutive_wins" in result
+    assert "max_consecutive_losses" in result
+
+    assert isinstance(result["equity_curve"], list)
+    assert len(result["equity_curve"]) >= 1
+    assert result["max_consecutive_wins"] >= 0
+    assert result["max_consecutive_losses"] >= 0
+
+
+def test_backtest_equity_curve_ends_at_final_balance():
+    df = make_data(rows=160, target_indices=[130, 150])
+
+    result = backtest(
+        df,
+        ready_signal,
+        capital=10000,
+        risk_pct=1,
+        commission_bps=0,
+        slippage=0,
+        max_bars=100,
+        step=1,
+    )
+
+    assert result["equity_curve"][-1] == result["final_balance"]
+
+
+def test_backtest_average_metrics_are_numeric():
+    df = make_data(rows=160, target_indices=[130, 150])
+
+    result = backtest(
+        df,
+        ready_signal,
+        capital=10000,
+        risk_pct=1,
+        commission_bps=0,
+        slippage=0,
+        max_bars=100,
+        step=1,
+    )
+
+    assert isinstance(result["average_win"], float)
+    assert isinstance(result["average_loss"], float)
+

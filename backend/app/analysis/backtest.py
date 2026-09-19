@@ -236,6 +236,47 @@ def backtest(
             drawdown = (peak - value) / peak
             max_dd = max(max_dd, drawdown)
 
+    # V8 risk and performance metrics.
+    winning_results = [
+        trade["result"] for trade in trades
+        if trade["result"] > 0
+    ]
+
+    losing_results = [
+        trade["result"] for trade in trades
+        if trade["result"] <= 0
+    ]
+
+    average_win = (
+        sum(winning_results) / len(winning_results)
+        if winning_results else 0.0
+    )
+
+    average_loss = (
+        sum(losing_results) / len(losing_results)
+        if losing_results else 0.0
+    )
+
+    max_consecutive_wins = 0
+    max_consecutive_losses = 0
+    current_wins = 0
+    current_losses = 0
+
+    for trade in trades:
+        if trade["result"] > 0:
+            current_wins += 1
+            current_losses = 0
+        else:
+            current_losses += 1
+            current_wins = 0
+
+        max_consecutive_wins = max(
+            max_consecutive_wins, current_wins
+        )
+        max_consecutive_losses = max(
+            max_consecutive_losses, current_losses
+        )
+
     return {
         "total_trades": len(trades),
         "winning_trades": len(wins),
@@ -259,5 +300,10 @@ def backtest(
         "final_balance": float(balance),
         "bars_tested": len(work),
         "evaluation_step": evaluation_step,
+        "equity_curve": equity,
+        "average_win": float(average_win),
+        "average_loss": float(average_loss),
+        "max_consecutive_wins": max_consecutive_wins,
+        "max_consecutive_losses": max_consecutive_losses,
         "trades": trades,
     }

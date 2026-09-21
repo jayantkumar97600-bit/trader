@@ -496,3 +496,49 @@ def test_backtest_v11_session_stats_are_present():
         assert "losses" in stats
         assert "net_profit" in stats
         assert "win_rate" in stats
+
+
+def test_backtest_v13_monthly_stats_are_present():
+    df = make_data(rows=160, target_indices=[130, 150])
+
+    df["timestamp"] = pd.date_range(
+        "2026-01-01",
+        periods=len(df),
+        freq="15min",
+        tz="UTC",
+    )
+
+    result = backtest(
+        df,
+        ready_signal,
+        capital=10000,
+        risk_pct=1,
+        commission_bps=0,
+        slippage=0,
+        max_bars=100,
+        step=1,
+    )
+
+    assert "monthly_stats" in result
+
+    monthly = result["monthly_stats"]
+
+    assert isinstance(monthly, dict)
+
+    total_monthly_trades = sum(
+        stats["trades"]
+        for stats in monthly.values()
+    )
+
+    assert total_monthly_trades == result["total_trades"]
+
+    for month, stats in monthly.items():
+        assert len(month) == 7
+        assert month[4] == "-"
+        assert "trades" in stats
+        assert "wins" in stats
+        assert "losses" in stats
+        assert "net_profit" in stats
+        assert "win_rate" in stats
+        assert isinstance(stats["win_rate"], float)
+        assert isinstance(stats["net_profit"], float)

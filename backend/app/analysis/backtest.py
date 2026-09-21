@@ -483,6 +483,52 @@ def backtest(
         )
     )
 
+    # V13 monthly performance analytics.
+    monthly_stats = {}
+
+    for trade in trades:
+        entry_index = trade["entry_index"]
+        month_key = "UNKNOWN"
+
+        if "timestamp" in work.columns:
+            try:
+                timestamp = pd.to_datetime(
+                    work.iloc[entry_index]["timestamp"],
+                    utc=True,
+                    errors="coerce",
+                )
+
+                if not pd.isna(timestamp):
+                    month_key = timestamp.strftime("%Y-%m")
+
+            except (IndexError, KeyError, TypeError, ValueError):
+                month_key = "UNKNOWN"
+
+        if month_key not in monthly_stats:
+            monthly_stats[month_key] = {
+                "trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "net_profit": 0.0,
+            }
+
+        stats = monthly_stats[month_key]
+        stats["trades"] += 1
+        stats["net_profit"] += float(trade["result"])
+
+        if trade["result"] > 0:
+            stats["wins"] += 1
+        else:
+            stats["losses"] += 1
+
+    for stats in monthly_stats.values():
+        stats["win_rate"] = (
+            stats["wins"] / stats["trades"] * 100
+            if stats["trades"] else 0.0
+        )
+        stats["net_profit"] = float(stats["net_profit"])
+        stats["win_rate"] = float(stats["win_rate"])
+
     return {
         "total_trades": len(trades),
         "winning_trades": len(wins),
@@ -543,4 +589,5 @@ def backtest(
         ),
         "median_trade_duration": float(median_trade_duration),
         "session_stats": session_stats,
+        "monthly_stats": monthly_stats,
     }

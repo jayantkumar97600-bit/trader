@@ -44,6 +44,16 @@ def test_backtest_returns_summary():
     assert "total_trades" in result
     assert "final_balance" in result
     assert "max_drawdown" in result
+    assert "diagnostics" in result
+    assert "baseline" in result
+    assert result["diagnostics"]["executed_trades"] == result["total_trades"]
+    assert result["diagnostics"]["entry_ready"] >= result["total_trades"]
+    assert result["baseline"]["performance"]["total_trades"] == result["total_trades"]
+    assert "gate_failures" in result["baseline"]["funnel"]
+    assert "failed_gate_combinations" in result["baseline"]["funnel"]
+    assert "near_miss_samples" in result["baseline"]["funnel"]
+    assert "entry_check_statuses" in result["baseline"]["funnel"]
+    assert "price_action_profile" in result["baseline"]["funnel"]
 
 
 def test_backtest_does_not_open_overlapping_positions():
@@ -83,6 +93,43 @@ def test_backtest_handles_no_trade_signal():
     )
 
     assert result["total_trades"] == 0
+
+
+def test_backtest_collects_not_ready_confirmation_checks():
+    df = make_data()
+
+    def waiting_signal(part):
+        return {
+            "status": "WAIT FOR CONFIRMATION",
+            "direction": "SHORT",
+            "decision": {
+                "decision": "WAIT",
+                "entry_ready": False,
+                "failed_gates": ["PRICE_ACTION"],
+                "passed_count": 7,
+            },
+            "entry_confirmation": {
+                "status": "PARTIAL",
+                "reason": "Price action is incomplete.",
+                "checks": {
+                    "price_action": {
+                        "status": "WAIT",
+                        "reason": "Directional confirmation unavailable.",
+                    },
+                },
+            },
+        }
+
+    result = backtest(
+        df,
+        waiting_signal,
+        capital=10000,
+        max_bars=100,
+        step=10,
+    )
+
+    funnel = result["baseline"]["funnel"]
+    assert funnel["entry_check_statuses"]["price_action"]["WAIT"] > 0
 
 
 

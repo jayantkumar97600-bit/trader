@@ -11,7 +11,7 @@ NEUTRAL = "NEUTRAL"
 # ---------------------------------------------------------
 
 # 5M candles. A confirmation older than this is stale.
-MAX_EVENT_AGE_BARS = 12
+MAX_EVENT_AGE_BARS = 24
 
 # Liquidity can remain relevant slightly longer than a
 # direct entry event, but it still cannot remain valid forever.
@@ -264,6 +264,52 @@ def _check_bos(
 # Fresh CHoCH
 # ---------------------------------------------------------
 
+def _check_internal_bos(structure, direction, current_index):
+    if not structure:
+        return {
+            "status": "WAIT",
+            "fresh": False,
+            "reason": "5M structure unavailable.",
+        }
+
+    internal_bos = structure.get("internal_bos", [])
+
+    if not internal_bos:
+        return {
+            "status": "WAIT",
+            "fresh": False,
+            "reason": "No confirmed 5M internal BOS.",
+        }
+
+    matching_events = [
+        event for event in internal_bos
+        if event.get("direction") == direction
+    ]
+
+    if not matching_events:
+        return {
+            "status": "WAIT",
+            "fresh": False,
+            "reason": "No 5M internal BOS confirms direction.",
+        }
+
+    latest = matching_events[-1]
+
+    quality = _event_quality(
+        latest,
+        current_index,
+        MAX_EVENT_AGE_BARS,
+        MIN_BOS_DISPLACEMENT_ATR,
+    )
+
+    quality["event"] = latest
+
+    if quality["status"] == "PASS":
+        quality["reason"] = "Fresh 5M internal BOS confirms direction."
+
+    return quality
+
+
 def _check_choch(
     structure,
     direction,
@@ -333,13 +379,6 @@ def _check_price_action(
         NEUTRAL,
     )
     expected_pa_direction = _direction_from_trade(direction)
-
-    print(
-        "DEBUG PA:",
-        "trade_direction=", direction,
-        "pa_direction=", pa_direction,
-        "expected=", expected_pa_direction,
-    )
 
     pa_state = price_action.get(
         "state",
@@ -678,6 +717,16 @@ def analyze_entry_confirmation(
     )
 
     # -----------------------------------------------------
+    # Fresh Internal BOS
+    # -----------------------------------------------------
+
+    checks["internal_bos"] = _check_internal_bos(
+        structure,
+        direction,
+        current_index,
+    )
+
+    # -----------------------------------------------------
     # Fresh CHoCH
     # -----------------------------------------------------
 
@@ -719,14 +768,22 @@ def analyze_entry_confirmation(
     # -----------------------------------------------------
     # Evidence
     # -----------------------------------------------------
+    # Internal BOS is a transition trigger, not a separate
+    # equal-weight confirmation check.
+
+    score_checks = {
+        key: value
+        for key, value in checks.items()
+        if key != "internal_bos"
+    }
 
     passed = sum(
         1
-        for check in checks.values()
+        for check in score_checks.values()
         if check.get("status") == "PASS"
     )
 
-    total = len(checks)
+    total = len(score_checks)
 
     score = (
         round(
@@ -749,9 +806,14 @@ def analyze_entry_confirmation(
         checks["choch"].get("status") == "PASS"
     )
 
+    fresh_internal_bos = (
+        checks["internal_bos"].get("status") == "PASS"
+    )
+
     structural_event = (
         fresh_bos
         or fresh_choch
+        or fresh_internal_bos
     )
 
     # -----------------------------------------------------
@@ -761,6 +823,28 @@ def analyze_entry_confirmation(
     structure_pass = (
         checks["structure"].get("status")
         == "PASS"
+    )
+
+    internal_bos_pass = (
+        checks["internal_bos"].get("status")
+        == "PASS"
+    )
+
+    external_structure_opposite = (
+        structure is not None
+        and structure.get("bias", NEUTRAL)
+        in (BULLISH, BEARISH)
+        and structure.get("bias") != direction
+    )
+
+    transition_structure = (
+        external_structure_opposite
+        and internal_bos_pass
+    )
+
+    effective_structure_pass = (
+        structure_pass
+        or transition_structure
     )
 
     pa_pass = (
@@ -791,7 +875,7 @@ def analyze_entry_confirmation(
     # A fresh conflicting liquidity sweep blocks entry.
 
     confirmed = (
-        structure_pass
+        effective_structure_pass
         and structural_event
         and pa_pass
         and (
@@ -804,11 +888,19 @@ def analyze_entry_confirmation(
     if confirmed:
         status = "CONFIRMED"
 
-        reason = (
-            "Fresh 5M structural confirmation, "
-            "price action and contextual confirmation "
-            "are aligned."
-        )
+        if transition_structure:
+            reason = (
+                "Fresh internal 5M BOS confirms a "
+                "transition against the current external "
+                "5M structure; price action and contextual "
+                "confirmation are aligned."
+            )
+        else:
+            reason = (
+                "Fresh 5M structural confirmation, "
+                "price action and contextual confirmation "
+                "are aligned."
+            )
 
     elif liquidity_conflict:
         status = "WAIT"
@@ -899,3 +991,4 @@ def analyze_entry_confirmation(
             ),
         },
     }
+

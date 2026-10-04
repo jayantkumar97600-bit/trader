@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pathlib import Path
 import pandas as pd
 
@@ -24,6 +24,7 @@ from ..analysis.backtest import backtest
 
 router = APIRouter(prefix="/api")
 DATA = Path("/app/data") if Path("/app/data").exists() else Path(__file__).resolve().parents[3] / "data"
+RR_COMPARISON_EPSILON = 1e-9
 
 class AnalyzeRequest(BaseModel):
     asset: str = "XAUUSD"
@@ -36,7 +37,12 @@ class AnalyzeRequest(BaseModel):
     hierarchy: list[str] | None = None
 
 class BacktestRequest(AnalyzeRequest):
-    pass
+    backtest_bars: int = Field(default=5000, ge=100, le=50000)
+    backtest_step: int = Field(default=15, ge=1, le=100)
+    enable_price_action_gate: bool = True
+    enable_fresh_structure_gate: bool = True
+    enable_entry_context_gate: bool = True
+    enable_mtf_alignment_gate: bool = True
 
 class JournalRequest(BaseModel):
     timestamp: str
@@ -72,16 +78,112 @@ def getdf(name=None, timeframe="15m", asset="XAUUSD", limit=5000):
 def _hierarchy(req):
     return req.hierarchy or (["4h", "1h", "15m", "5m"] if req.timeframe == "5m" else ["4h", "1h", req.timeframe, "5m"])
 
-def _load_mtf(req):
+
+def _trade_direction_from_bias(bias):
+    if bias == "BULLISH":
+        return "LONG"
+    if bias == "BEARISH":
+        return "SHORT"
+    return None
+
+
+def _meets_min_rr(actual_rr, minimum_rr):
+    try:
+        return float(actual_rr) >= float(minimum_rr) - RR_COMPARISON_EPSILON
+    except (TypeError, ValueError):
+        return False
+
+
+TIMEFRAME_DURATIONS = {
+    "1m": "1min",
+    "3m": "3min",
+    "5m": "5min",
+    "15m": "15min",
+    "30m": "30min",
+    "1h": "1h",
+    "4h": "4h",
+    "1d": "1d",
+    "1w": "7d",
+}
+
+
+def _timeframe_duration(timeframe):
+    try:
+        return pd.Timedelta(TIMEFRAME_DURATIONS[timeframe.lower()])
+    except KeyError as exc:
+        raise ValueError(f"Unsupported timeframe: {timeframe}") from exc
+
+
+def _timestamp_text(value):
+    if value is None or pd.isna(value):
+        return None
+    return pd.Timestamp(value).isoformat()
+
+
+def _frame_context(frames, source_timestamp, decision_timestamp):
+    context = {
+        "source_timestamp": _timestamp_text(source_timestamp),
+        "decision_timestamp": _timestamp_text(decision_timestamp),
+        "timeframes": {},
+    }
+
+    for tf, frame_df in frames.items():
+        if frame_df is None or frame_df.empty:
+            context["timeframes"][tf] = {
+                "bars": 0,
+                "first_timestamp": None,
+                "last_timestamp": None,
+                "cutoff_ok": True,
+            }
+            continue
+
+        last_timestamp = frame_df["timestamp"].iloc[-1]
+        last_close_timestamp = last_timestamp + _timeframe_duration(tf)
+        context["timeframes"][tf] = {
+            "bars": len(frame_df),
+            "first_timestamp": _timestamp_text(frame_df["timestamp"].iloc[0]),
+            "last_timestamp": _timestamp_text(last_timestamp),
+            "last_close_timestamp": _timestamp_text(last_close_timestamp),
+            "cutoff_ok": bool(last_close_timestamp <= decision_timestamp),
+        }
+
+    return context
+
+
+def _load_mtf(req, cutoff=None, source_frames=None, full_history=False):
     frames = {}
+
     for tf in dict.fromkeys(_hierarchy(req)):
         try:
-            frames[tf] = getdf(timeframe=tf, asset=req.asset, limit=1500)
+            frame_df = (
+                source_frames.get(tf)
+                if source_frames is not None
+                else getdf(
+                    timeframe=tf,
+                    asset=req.asset,
+                    limit=None if cutoff is not None or full_history else 1500,
+                )
+            )
+
+            if frame_df is not None and cutoff is not None:
+                candle_closes = frame_df["timestamp"] + _timeframe_duration(tf)
+                frame_df = frame_df[
+                    candle_closes <= cutoff
+                ].tail(1500).reset_index(drop=True)
+
+            frames[tf] = frame_df
+
         except HTTPException:
             frames[tf] = None
+
     return frames
 
-def make_signal(df, req):
+def make_signal(df, req, mtf_source_frames=None):
+    enable_price_action_gate = getattr(req, 'enable_price_action_gate', True)
+    enable_fresh_structure_gate = getattr(req, 'enable_fresh_structure_gate', True)
+    enable_entry_context_gate = getattr(req, 'enable_entry_context_gate', True)
+    enable_mtf_alignment_gate = getattr(req, 'enable_mtf_alignment_gate', True)
+
     if len(df) < 60:
         return {"status": "Insufficient data"}
 
@@ -124,7 +226,18 @@ def make_signal(df, req):
     # Default hierarchy:
     # 4H -> 1H -> 15M -> 5M
     # ============================================================
-    frames = _load_mtf(req)
+    source_timestamp = df["timestamp"].iloc[-1]
+    decision_timestamp = source_timestamp + _timeframe_duration(req.timeframe)
+    frames = _load_mtf(
+        req,
+        cutoff=decision_timestamp,
+        source_frames=mtf_source_frames,
+    )
+    mtf_context = _frame_context(
+        frames,
+        source_timestamp,
+        decision_timestamp,
+    )
     hierarchy = _hierarchy(req)
 
     mtf = analyze_mtf(
@@ -208,6 +321,10 @@ def make_signal(df, req):
         setup=setup,
         price_action=five_minute_pa or pa,
         min_rr=req.min_rr,
+        enable_price_action_gate=enable_price_action_gate,
+        enable_fresh_structure_gate=enable_fresh_structure_gate,
+        enable_entry_context_gate=enable_entry_context_gate,
+        enable_mtf_alignment_gate=enable_mtf_alignment_gate,
     )
 
     # ============================================================
@@ -218,24 +335,20 @@ def make_signal(df, req):
         "NEUTRAL",
     )
 
-    direction = (
-        "LONG"
-        if weighted == "BULLISH"
-        else "SHORT"
-        if weighted == "BEARISH"
-        else None
-    )
+    macro_bias = mtf.get("macro_bias", "NEUTRAL")
+    direction = _trade_direction_from_bias(macro_bias)
 
     if not direction:
         return {
             "status": "NO TRADE",
-            "reason": "MTF bias is neutral/conflicted.",
+            "reason": "MTF macro bias is neutral/conflicted.",
             "mtf": mtf,
             "market_structure": st,
             "confluence": confluence,
             "liquidity": liquidity,
             "levels": levels,
             "price_action": pa,
+            "historical_mtf_context": mtf_context,
 
             "data_source": "MT5 historical CSV",
             "timeframe": req.timeframe,
@@ -453,7 +566,7 @@ def make_signal(df, req):
 
         "risk_reward": (
             10
-            if plan["rr"] >= req.min_rr
+            if _meets_min_rr(plan["rr"], req.min_rr)
             else 0
         ),
     }
@@ -500,23 +613,36 @@ def make_signal(df, req):
     # ============================================================
     # 14. TRADE STATUS
     # ============================================================
-    if plan["rr"] < req.min_rr:
+    if decision.get("entry_ready", False):
+        status = "READY"
+        status_reason = "All mandatory Decision Engine gates passed."
+
+    elif not _meets_min_rr(plan["rr"], req.min_rr):
         status = "NO TRADE"
+        status_reason = (
+            f"Risk/reward 1:{plan['rr']:.2f} is below minimum "
+            f"1:{req.min_rr:.2f}."
+        )
 
     elif not price_action_confirmation:
         status = "WAIT FOR CONFIRMATION"
+        status_reason = "Price action confirmation is incomplete."
 
     elif score >= 75:
         status = "WAIT FOR CONFIRMATION"
+        status_reason = "Decision Engine confirmation is incomplete."
 
     else:
         status = "WAIT FOR CONFIRMATION"
+        status_reason = "Setup score is below the actionable threshold."
 
     # ============================================================
     # 15. FINAL RESPONSE
     # ============================================================
     return {
         "status": status,
+
+        "reason": status_reason,
 
         "asset": req.asset,
         "timeframe": req.timeframe,
@@ -542,6 +668,7 @@ def make_signal(df, req):
 
         "price_action": pa,
         "five_minute_price_action": five_minute_pa,
+        "historical_mtf_context": mtf_context,
 
         "candlesticks": cps[-8:],
 
@@ -648,17 +775,35 @@ def analyze(req: AnalyzeRequest):
 @router.post("/backtest")
 def run_backtest(req: BacktestRequest):
     try:
-        # Keep the HTTP request bounded. The full 7M-row history remains on disk;
-        # a backtest only needs a configurable recent window for the MVP.
-        df = getdf(req.csv_path, req.timeframe, req.asset, 5000)
+        # Keep each historical run bounded while allowing validation across
+        # multiple market regimes rather than only the most recent window.
+        df = getdf(
+            req.csv_path,
+            req.timeframe,
+            req.asset,
+            req.backtest_bars,
+        )
+
+        mtf_source_frames = _load_mtf(req, full_history=True)
 
         def signal_fn(part):
             try:
-                return make_signal(part.tail(500), req)
+                return make_signal(
+                    part.tail(500),
+                    req,
+                    mtf_source_frames=mtf_source_frames,
+                )
             except Exception:
                 return None
 
-        return backtest(df, signal_fn, req.capital, req.risk_pct, max_bars=300, step=30)
+        return backtest(
+            df,
+            signal_fn,
+            req.capital,
+            req.risk_pct,
+            max_bars=req.backtest_bars,
+            step=req.backtest_step,
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -669,3 +814,13 @@ def journal(req: JournalRequest): return add_trade(req.model_dump())
 
 @router.get("/journal")
 def journal_list(): return list_trades()
+
+
+
+
+
+
+
+
+
+

@@ -15,6 +15,16 @@ def _safe_float(value, default=0.0):
         return default
 
 
+def _timestamp_text(value):
+    if value is None:
+        return None
+
+    try:
+        return value.isoformat()
+    except AttributeError:
+        return str(value)
+
+
 def _clamp(value, low=0.0, high=100.0):
     return max(low, min(high, float(value)))
 
@@ -81,6 +91,7 @@ def _candle_quality(row):
 
     if candle_range <= 0:
         return {
+            "timestamp": _timestamp_text(row.get("timestamp")),
             "quality": "INVALID",
             "body_ratio": 0.0,
             "direction": NEUTRAL,
@@ -101,6 +112,7 @@ def _candle_quality(row):
         quality = "INDECISION"
 
     return {
+        "timestamp": _timestamp_text(row.get("timestamp")),
         "quality": quality,
         "body_ratio": round(body_ratio, 3),
         "direction": _candle_direction(row),

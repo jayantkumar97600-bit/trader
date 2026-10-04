@@ -29,6 +29,45 @@ def backtest(
     equity = [balance]
     trades = []
 
+    # V14.1 diagnostic counters.
+    diagnostics = {
+        "signal_evaluations": 0,
+        "signal_exceptions": 0,
+        "status_rejected": 0,
+        "entry_not_ready": 0,
+        "invalid_direction": 0,
+        "invalid_levels": 0,
+        "invalid_stop_distance": 0,
+        "executed_trades": 0,
+        "executed_trade_traces": [],
+        "signal_statuses": {},
+        "status_reasons": {},
+        "signal_directions": {},
+        "decision_states": {},
+        "entry_ready": 0,
+        "execution_rejections": {},
+        "executed_directions": {"LONG": 0, "SHORT": 0},
+        "gate_failures": {},
+        "failed_gate_combinations": {},
+        "passed_gate_counts": {},
+        "entry_confirmation_statuses": {},
+        "entry_confirmation_reasons": {},
+        "entry_check_statuses": {},
+        "price_action_failures": {},
+        "price_action_profile": {
+            "directions": {},
+            "states": {},
+            "score_bands": {},
+            "direction_matches_trade": 0,
+            "direction_opposite_trade": 0,
+            "direction_neutral_trade": 0,
+            "direction_conflicts_trade": 0,
+        },
+        "price_action_samples": [],
+        "near_miss_samples": [],
+        "rejection_details": [],
+    }
+
     start = 60
     end = len(work) - 1
     evaluation_step = max(1, int(step))
@@ -36,25 +75,247 @@ def backtest(
     i = start
 
     while i < end:
+        diagnostics["signal_evaluations"] += 1
+
         try:
             sig = signal_fn(work.iloc[: i + 1])
         except Exception:
+            diagnostics["signal_exceptions"] += 1
             i += evaluation_step
             continue
 
-        if (
-            not sig
-            or sig.get("status") in (
-                "NO TRADE",
-                "WAIT",
-                "Insufficient data",
+        if not sig:
+            diagnostics["status_rejected"] += 1
+            diagnostics["signal_statuses"]["EMPTY_SIGNAL"] = (
+                diagnostics["signal_statuses"].get("EMPTY_SIGNAL", 0) + 1
             )
-            or not sig.get("decision", {}).get("entry_ready", False)
-        ):
             i += evaluation_step
             continue
+
+        status = sig.get("status", "MISSING_STATUS")
+        diagnostics["signal_statuses"][status] = (
+            diagnostics["signal_statuses"].get(status, 0) + 1
+        )
+
+        reason = sig.get("reason")
+        if reason:
+            diagnostics["status_reasons"][reason] = (
+                diagnostics["status_reasons"].get(reason, 0) + 1
+            )
+
+        signal_direction = sig.get("direction", "NEUTRAL")
+        diagnostics["signal_directions"][signal_direction] = (
+            diagnostics["signal_directions"].get(signal_direction, 0) + 1
+        )
+
+        decision_state = sig.get("decision", {}).get(
+            "decision",
+            "MISSING_DECISION",
+        )
+        diagnostics["decision_states"][decision_state] = (
+            diagnostics["decision_states"].get(decision_state, 0) + 1
+        )
+
+        pa_result = (
+            sig.get("five_minute_price_action")
+            or sig.get("price_action")
+            or {}
+        )
+
+        pa_direction = pa_result.get("direction", "MISSING")
+        pa_state = pa_result.get("state", "MISSING")
+        pa_score = pa_result.get("score")
+        pa_profile = diagnostics["price_action_profile"]
+        pa_profile["directions"][pa_direction] = (
+            pa_profile["directions"].get(pa_direction, 0) + 1
+        )
+        pa_profile["states"][pa_state] = (
+            pa_profile["states"].get(pa_state, 0) + 1
+        )
+
+        try:
+            pa_score_value = float(pa_score)
+        except (TypeError, ValueError):
+            pa_score_value = None
+
+        if pa_score_value is None:
+            score_band = "MISSING"
+        elif pa_score_value < 20:
+            score_band = "0-19"
+        elif pa_score_value < 40:
+            score_band = "20-39"
+        elif pa_score_value < 65:
+            score_band = "40-64"
+        else:
+            score_band = "65-100"
+
+        pa_profile["score_bands"][score_band] = (
+            pa_profile["score_bands"].get(score_band, 0) + 1
+        )
+
+        expected_pa_direction = (
+            "BULLISH" if signal_direction == "LONG" else "BEARISH"
+        )
+        if pa_direction == expected_pa_direction:
+            pa_profile["direction_matches_trade"] += 1
+        elif pa_direction == "NEUTRAL":
+            pa_profile["direction_neutral_trade"] += 1
+        else:
+            pa_profile["direction_opposite_trade"] += 1
+
+        if pa_direction != expected_pa_direction:
+            pa_profile["direction_conflicts_trade"] += 1
+
+        if len(diagnostics["price_action_samples"]) < 5000:
+            diagnostics["price_action_samples"].append({
+                "source_timestamp": sig.get("historical_mtf_context", {}).get(
+                    "source_timestamp"
+                ),
+                "evaluation_timestamp": pa_result.get("current_candle", {}).get(
+                    "timestamp"
+                ),
+                "mtf_context": sig.get("historical_mtf_context", {}),
+                "trade_direction": sig.get("direction"),
+                "signal_entry": sig.get("entry"),
+                "signal_stop_loss": sig.get("stop_loss"),
+                "signal_take_profit": sig.get("take_profit_1"),
+                "pa_direction": pa_result.get("direction"),
+                "pa_state": pa_result.get("state"),
+                "pa_score": pa_result.get("score"),
+                "momentum": pa_result.get("momentum"),
+                "rejection": pa_result.get("rejection"),
+                "engulfing": pa_result.get("engulfing"),
+                "breakout": pa_result.get("breakout"),
+                "structure_context": pa_result.get("structure_context"),
+                "sr_context": pa_result.get("sr_context"),
+            })
+
+        if status in (
+            "NO TRADE",
+            "WAIT",
+            "Insufficient data",
+        ):
+            diagnostics["status_rejected"] += 1
+            i += evaluation_step
+            continue
+
+        if not sig.get("decision", {}).get("entry_ready", False):
+            diagnostics["entry_not_ready"] += 1
+
+            decision = sig.get("decision", {})
+            failed_gates = decision.get("failed_gates", [])
+
+            for gate in failed_gates:
+                diagnostics["gate_failures"][gate] = (
+                    diagnostics["gate_failures"].get(gate, 0) + 1
+                )
+
+            failed_combination = " + ".join(sorted(failed_gates)) or "NONE"
+            diagnostics["failed_gate_combinations"][failed_combination] = (
+                diagnostics["failed_gate_combinations"].get(
+                    failed_combination,
+                    0,
+                ) + 1
+            )
+
+            passed_count = decision.get("passed_count", 0)
+            diagnostics["passed_gate_counts"][passed_count] = (
+                diagnostics["passed_gate_counts"].get(passed_count, 0) + 1
+            )
+
+            confirmation_status = sig.get("entry_confirmation", {}).get(
+                "status",
+                "MISSING",
+            )
+            diagnostics["entry_confirmation_statuses"][confirmation_status] = (
+                diagnostics["entry_confirmation_statuses"].get(
+                    confirmation_status,
+                    0,
+                ) + 1
+            )
+
+            confirmation_reason = sig.get("entry_confirmation", {}).get(
+                "reason",
+                "MISSING",
+            )
+            diagnostics["entry_confirmation_reasons"][confirmation_reason] = (
+                diagnostics["entry_confirmation_reasons"].get(
+                    confirmation_reason,
+                    0,
+                ) + 1
+            )
+
+            confirmation_checks = sig.get("entry_confirmation", {}).get(
+                "checks",
+                {},
+            )
+            for name, check in confirmation_checks.items():
+                check_status = check.get("status", "MISSING")
+                by_status = diagnostics["entry_check_statuses"].setdefault(
+                    name,
+                    {},
+                )
+                by_status[check_status] = by_status.get(check_status, 0) + 1
+
+            diagnostics["near_miss_samples"].append({
+                "source_timestamp": sig.get("historical_mtf_context", {}).get(
+                    "source_timestamp"
+                ),
+                "direction": sig.get("direction"),
+                "evaluation_index": i,
+                "signal_entry": sig.get("entry"),
+                "signal_stop_loss": sig.get("stop_loss"),
+                "signal_take_profit": sig.get("take_profit_1"),
+                "passed_gate_count": passed_count,
+                "failed_gates": failed_gates,
+                "passed_gates": decision.get("passed_gates", []),
+                "entry_confirmation_status": confirmation_status,
+                "entry_confirmation_reason": sig.get(
+                    "entry_confirmation",
+                    {},
+                ).get("reason"),
+                "checks": {
+                    name: {
+                        "status": check.get("status"),
+                        "reason": check.get("reason"),
+                    }
+                    for name, check in confirmation_checks.items()
+                },
+            })
+
+            pa_reason = (
+                sig.get("entry_confirmation", {})
+                .get("checks", {})
+                .get("price_action", {})
+                .get("reason", "UNKNOWN")
+            )
+
+            diagnostics["price_action_failures"][pa_reason] = (
+                diagnostics["price_action_failures"].get(pa_reason, 0) + 1
+            )
+
+            diagnostics["rejection_details"].append(
+                {
+                    "status": sig.get("status"),
+                    "direction": sig.get("direction"),
+                "evaluation_index": i,
+                "signal_entry": sig.get("entry"),
+                "signal_stop_loss": sig.get("stop_loss"),
+                "signal_take_profit": sig.get("take_profit_1"),
+                    "decision": sig.get("decision"),
+                }
+            )
+
+            i += evaluation_step
+            continue
+
+        diagnostics["entry_ready"] += 1
 
         if sig.get("direction") not in ("LONG", "SHORT"):
+            diagnostics["invalid_direction"] += 1
+            diagnostics["execution_rejections"]["INVALID_DIRECTION"] = (
+                diagnostics["execution_rejections"].get("INVALID_DIRECTION", 0) + 1
+            )
             i += evaluation_step
             continue
 
@@ -63,6 +324,10 @@ def backtest(
             sl = float(sig["stop_loss"])
             tp = float(sig["take_profit_1"])
         except (KeyError, TypeError, ValueError):
+            diagnostics["invalid_levels"] += 1
+            diagnostics["execution_rejections"]["INVALID_LEVELS"] = (
+                diagnostics["execution_rejections"].get("INVALID_LEVELS", 0) + 1
+            )
             i += evaluation_step
             continue
 
@@ -87,6 +352,9 @@ def backtest(
 
         if direction == "LONG":
             if entry <= sl:
+                diagnostics["execution_rejections"]["GAP_BEYOND_STOP"] = (
+                    diagnostics["execution_rejections"].get("GAP_BEYOND_STOP", 0) + 1
+                )
                 i += evaluation_step
                 continue
             if entry >= tp:
@@ -94,6 +362,9 @@ def backtest(
                 gap_exit_reason = "TAKE_PROFIT_GAP"
         else:
             if entry >= sl:
+                diagnostics["execution_rejections"]["GAP_BEYOND_STOP"] = (
+                    diagnostics["execution_rejections"].get("GAP_BEYOND_STOP", 0) + 1
+                )
                 i += evaluation_step
                 continue
             if entry <= tp:
@@ -103,6 +374,10 @@ def backtest(
         stop_dist = abs(entry - sl)
 
         if not math.isfinite(stop_dist) or stop_dist <= 0:
+            diagnostics["invalid_stop_distance"] += 1
+            diagnostics["execution_rejections"]["INVALID_STOP_DISTANCE"] = (
+                diagnostics["execution_rejections"].get("INVALID_STOP_DISTANCE", 0) + 1
+            )
             i += evaluation_step
             continue
 
@@ -171,6 +446,9 @@ def backtest(
 
         # If the position did not close, stop this simulation path.
         if exit_price is None or exit_index is None:
+            diagnostics["execution_rejections"]["UNRESOLVED_POSITION"] = (
+                diagnostics["execution_rejections"].get("UNRESOLVED_POSITION", 0) + 1
+            )
             i += evaluation_step
             continue
 
@@ -205,6 +483,20 @@ def backtest(
             "exit_reason": exit_reason,
             "balance": float(balance),
         })
+        diagnostics["executed_trades"] += 1
+        if len(diagnostics["executed_trade_traces"]) < 100:
+            diagnostics["executed_trade_traces"].append({
+                "entry_index": i,
+                "direction": direction,
+                "signal_entry": sig.get("entry"),
+                "signal_stop_loss": sig.get("stop_loss"),
+                "signal_take_profit": sig.get("take_profit_1"),
+                "setup": sig.get("setup"),
+                "decision": sig.get("decision"),
+                "entry_confirmation": sig.get("entry_confirmation"),
+                "price_action": sig.get("price_action"),
+            })
+        diagnostics["executed_directions"][direction] += 1
 
         # IMPORTANT:
         # Resume evaluation only after the previous trade closes.
@@ -529,6 +821,14 @@ def backtest(
         stats["net_profit"] = float(stats["net_profit"])
         stats["win_rate"] = float(stats["win_rate"])
 
+    diagnostics["near_miss_samples"] = sorted(
+        diagnostics["near_miss_samples"],
+        key=lambda sample: (
+            -sample["passed_gate_count"],
+            len(sample["failed_gates"]),
+        ),
+    )[:1000]
+
     return {
         "total_trades": len(trades),
         "winning_trades": len(wins),
@@ -590,4 +890,69 @@ def backtest(
         "median_trade_duration": float(median_trade_duration),
         "session_stats": session_stats,
         "monthly_stats": monthly_stats,
+        "baseline": {
+            "funnel": {
+                "signal_evaluations": diagnostics["signal_evaluations"],
+                "signal_exceptions": diagnostics["signal_exceptions"],
+                "signal_statuses": diagnostics["signal_statuses"],
+                "status_reasons": diagnostics["status_reasons"],
+                "signal_directions": diagnostics["signal_directions"],
+                "decision_states": diagnostics["decision_states"],
+                "status_rejected": diagnostics["status_rejected"],
+                "entry_not_ready": diagnostics["entry_not_ready"],
+                "entry_ready": diagnostics["entry_ready"],
+                "gate_failures": diagnostics["gate_failures"],
+                "failed_gate_combinations": diagnostics["failed_gate_combinations"],
+                "passed_gate_counts": diagnostics["passed_gate_counts"],
+                "entry_confirmation_statuses": diagnostics[
+                    "entry_confirmation_statuses"
+                ],
+                "entry_confirmation_reasons": diagnostics[
+                    "entry_confirmation_reasons"
+                ],
+                "entry_check_statuses": diagnostics["entry_check_statuses"],
+                "near_miss_samples": diagnostics["near_miss_samples"],
+                "price_action_failures": diagnostics["price_action_failures"],
+                "price_action_profile": diagnostics["price_action_profile"],
+                "execution_rejections": diagnostics["execution_rejections"],
+                "executed_trades": diagnostics["executed_trades"],
+            },
+            "performance": {
+                "total_trades": len(trades),
+                "winning_trades": len(wins),
+                "losing_trades": len(losses),
+                "win_rate": float(len(wins) / len(trades) * 100) if trades else 0.0,
+                "net_profit": float(net_profit),
+                "net_return": float((balance / capital - 1) * 100) if capital else 0.0,
+                "average_r_multiple": float(average_r_multiple),
+                "expectancy": float(expectancy),
+                "profit_factor": float(gross_win / gross_loss) if gross_loss else None,
+                "max_drawdown": float(max_dd * 100),
+                "max_drawdown_amount": float(max_drawdown_amount),
+            },
+            "distribution": {
+                "long_trades": len(long_trades),
+                "short_trades": len(short_trades),
+                "executed_directions": diagnostics["executed_directions"],
+                "long_win_rate": float(long_win_rate),
+                "short_win_rate": float(short_win_rate),
+                "exit_reasons": exit_reason_breakdown,
+            },
+            "sessions": session_stats,
+            "months": monthly_stats,
+        },
+        "diagnostics": diagnostics,
     }
+
+
+
+
+
+
+
+
+
+
+
+
+

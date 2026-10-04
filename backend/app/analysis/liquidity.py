@@ -281,7 +281,7 @@ def _period_levels(df):
     ts = pd.to_datetime(d["timestamp"], utc=True)
 
     d["_date"] = ts.dt.date
-    d["_week"] = ts.dt.to_period("W-SUN")
+    d["_week"] = ts.dt.tz_localize(None).dt.to_period("W-SUN")
 
     levels = []
 

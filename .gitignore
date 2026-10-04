@@ -43,3 +43,45 @@ data/mt5/XAUUSD_W1.csv
 
 # Local database
 backend/trading.db
+
+# Local backup snapshots
+*.backup*
+*.bak
+
+# Local trading research / diagnostic outputs
+backend/*_diagnostic.py
+backend/*_diagnostic.csv
+backend/*_diagnostic.json
+backend/*_research.py
+backend/*_research.csv
+backend/*_research.json
+backend/*_outcome*.csv
+backend/*_results.csv
+backend/*_robustness*.csv
+backend/*_stress*.csv
+backend/*_sensitivity*.csv
+backend/*_production_results.csv
+backend/*_production_trades.csv
+backend/*_setups.csv
+backend/*_levels.csv
+backend/*_samples.csv
+backend/*_trades.csv
+backend/*_monte_carlo*.py
+backend/*_monte_carlo*.csv
+backend/*_bootstrap*.py
+backend/*_bootstrap*.csv
+backend/*_wfo*.csv
+backend/*_walk_forward*.py
+backend/*_walk_forward*.csv
+backend/pa_samples_age24.json
+backend/edge_*.csv
+backend/temp_*.csv
+
+# Local paper-trading database backups
+backend/*.db.backup*
+
+# Local OOS/research result exports
+backend/bos_pa_dev_development.csv
+backend/bos_pa_dev_oos_2026.csv
+
+backend/temp_pa_relation_state.py

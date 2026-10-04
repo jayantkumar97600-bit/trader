@@ -12,6 +12,7 @@ SHORT = "SHORT"
 WAIT = "WAIT"
 NO_TRADE = "NO_TRADE"
 ENTRY_READY = "ENTRY_READY"
+RR_COMPARISON_EPSILON = 1e-9
 
 
 def _text(value: Any) -> str:
@@ -128,7 +129,7 @@ def _risk_reward_valid(
     except (TypeError, ValueError):
         return False
 
-    return rr_value >= float(min_rr)
+    return rr_value >= float(min_rr) - RR_COMPARISON_EPSILON
 
 
 def _setup_direction_valid(
@@ -221,6 +222,10 @@ def make_decision(
     setup: Dict[str, Any],
     price_action: Dict[str, Any],
     min_rr: float = 2.0,
+    enable_price_action_gate: bool = True,
+    enable_fresh_structure_gate: bool = True,
+    enable_entry_context_gate: bool = True,
+    enable_mtf_alignment_gate: bool = True,
 ) -> Dict[str, Any]:
     """
     Deterministic final decision engine.
@@ -266,7 +271,7 @@ def make_decision(
     reasons: List[str] = []
 
     # Gate 1: Higher-timeframe directional alignment.
-    if _check_direction_alignment(mtf, direction):
+    if (not enable_mtf_alignment_gate or _check_direction_alignment(mtf, direction)):
         passed_gates.append("MTF_ALIGNMENT")
     else:
         failed_gates.append("MTF_ALIGNMENT")
@@ -286,13 +291,15 @@ def make_decision(
     # Gate 3: Fresh structure confirmation.
     bos_check = checks.get("bos", {})
     choch_check = checks.get("choch", {})
+    internal_bos_check = checks.get("internal_bos", {})
 
     fresh_structure = (
         _is_fresh_pass(bos_check)
         or _is_fresh_pass(choch_check)
+        or _is_fresh_pass(internal_bos_check)
     )
 
-    if fresh_structure:
+    if (not enable_fresh_structure_gate or fresh_structure):
         passed_gates.append("FRESH_STRUCTURE")
     else:
         failed_gates.append("FRESH_STRUCTURE")
@@ -301,7 +308,12 @@ def make_decision(
         )
 
     # Gate 4: Price action.
-    if _price_action_confirms(price_action, direction):
+    # Default behavior remains unchanged. This flag exists only for
+    # controlled ablation testing and does not alter PA calculations.
+    if (
+        not enable_price_action_gate
+        or _price_action_confirms(price_action, direction)
+    ):
         passed_gates.append("PRICE_ACTION")
     else:
         failed_gates.append("PRICE_ACTION")
@@ -309,29 +321,25 @@ def make_decision(
             "Price action does not confirm the trade direction."
         )
 
-    # Gate 5: Liquidity freshness.
+    # Gate 5: Entry context.
+    # Entry confirmation treats a fresh liquidity sweep OR a confirmed
+    # retest as valid context; the final decision must use the same rule.
     liquidity_check = checks.get("liquidity", {})
-
-    if _is_fresh_pass(liquidity_check):
-        passed_gates.append("FRESH_LIQUIDITY")
-    else:
-        failed_gates.append("FRESH_LIQUIDITY")
-        reasons.append(
-            "Fresh liquidity confirmation is unavailable."
-        )
-
-    # Gate 6: Retest.
     retest_check = checks.get("retest", {})
+    has_entry_context = (
+        _is_fresh_pass(liquidity_check)
+        or _is_pass(retest_check)
+    )
 
-    if _is_pass(retest_check):
-        passed_gates.append("RETEST")
+    if (not enable_entry_context_gate or has_entry_context):
+        passed_gates.append("ENTRY_CONTEXT")
     else:
-        failed_gates.append("RETEST")
+        failed_gates.append("ENTRY_CONTEXT")
         reasons.append(
-            "Valid retest confirmation is unavailable."
+            "Neither fresh liquidity nor a valid retest confirms entry context."
         )
 
-    # Gate 7: Valid setup prices.
+    # Gate 6: Valid setup prices.
     if _has_valid_prices(setup):
         passed_gates.append("VALID_PRICES")
     else:
@@ -340,7 +348,7 @@ def make_decision(
             "Entry, stop-loss or take-profit data is invalid."
         )
 
-    # Gate 8: Risk/reward.
+    # Gate 7: Risk/reward.
     if _risk_reward_valid(setup, min_rr):
         passed_gates.append("RISK_REWARD")
     else:
@@ -349,7 +357,7 @@ def make_decision(
             f"Risk/reward is below the minimum of 1:{min_rr:.2f}."
         )
 
-    # Gate 9: Invalidation relationship.
+    # Gate 8: Invalidation relationship.
     invalidation = _invalidation_state(setup, direction)
 
     if invalidation["status"] == "VALID":
@@ -408,3 +416,9 @@ def make_decision(
             "win_probability": "Not calculated",
         },
     }
+
+
+
+
+
+

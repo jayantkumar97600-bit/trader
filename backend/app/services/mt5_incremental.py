@@ -38,6 +38,7 @@ def get_last_timestamp() -> pd.Timestamp:
 
 def resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     x = df.copy()
+
     x["timestamp"] = pd.to_datetime(
         x["timestamp"],
         utc=True,
@@ -82,16 +83,67 @@ def refresh_incremental() -> dict:
                     f"Could not select {SYMBOL}."
                 )
 
-        rates = mt5.copy_rates_from(
+        # ---------------------------------------------------------
+        # 1. Get latest available completed M1 candle from MT5.
+        # MT5 terminal/server time is the source of truth.
+        # ---------------------------------------------------------
+
+        latest_rates = mt5.copy_rates_from_pos(
+            SYMBOL,
+            mt5.TIMEFRAME_M1,
+            1,
+            1,
+        )
+
+        if latest_rates is None:
+            raise RuntimeError(
+                f"MT5 returned no latest M1 data: {mt5.last_error()}"
+            )
+
+        if len(latest_rates) == 0:
+            return {
+                "status": "NO_NEW_DATA",
+                "last_timestamp": str(last_timestamp),
+                "new_candles": 0,
+            }
+
+        latest_completed_timestamp = pd.Timestamp(
+            pd.to_datetime(
+                int(latest_rates[0]["time"]),
+                unit="s",
+                utc=True,
+            )
+        )
+
+        # ---------------------------------------------------------
+        # 2. If local CSV is already current, stop.
+        # ---------------------------------------------------------
+
+        if latest_completed_timestamp <= last_timestamp:
+            return {
+                "status": "NO_NEW_DATA",
+                "last_timestamp": str(last_timestamp),
+                "latest_mt5_timestamp": str(
+                    latest_completed_timestamp
+                ),
+                "new_candles": 0,
+            }
+
+        # ---------------------------------------------------------
+        # 3. Fetch explicitly from local CSV timestamp
+        #    through latest completed MT5 candle.
+        # ---------------------------------------------------------
+
+        rates = mt5.copy_rates_range(
             SYMBOL,
             mt5.TIMEFRAME_M1,
             last_timestamp.to_pydatetime(),
-            10000,
+            latest_completed_timestamp.to_pydatetime(),
         )
 
         if rates is None:
             raise RuntimeError(
-                f"MT5 returned no data: {mt5.last_error()}"
+                f"MT5 returned no range data: {mt5.last_error()}"
             )
 
         new_df = pd.DataFrame(rates)
@@ -100,8 +152,15 @@ def refresh_incremental() -> dict:
             return {
                 "status": "NO_NEW_DATA",
                 "last_timestamp": str(last_timestamp),
+                "latest_mt5_timestamp": str(
+                    latest_completed_timestamp
+                ),
                 "new_candles": 0,
             }
+
+        # ---------------------------------------------------------
+        # 4. Normalize MT5 M1 data.
+        # ---------------------------------------------------------
 
         new_df["timestamp"] = pd.to_datetime(
             new_df["time"],
@@ -110,7 +169,9 @@ def refresh_incremental() -> dict:
         )
 
         new_df = new_df.rename(
-            columns={"tick_volume": "volume"}
+            columns={
+                "tick_volume": "volume",
+            }
         )
 
         new_df = new_df[
@@ -124,20 +185,38 @@ def refresh_incremental() -> dict:
             ]
         ]
 
+        # Only candles strictly newer than local CSV.
         new_df = new_df[
             new_df["timestamp"] > last_timestamp
+        ]
+
+        # Never include an incomplete/current M1 candle.
+        new_df = new_df[
+            new_df["timestamp"] <= latest_completed_timestamp
         ]
 
         if new_df.empty:
             return {
                 "status": "NO_NEW_DATA",
                 "last_timestamp": str(last_timestamp),
+                "latest_mt5_timestamp": str(
+                    latest_completed_timestamp
+                ),
                 "new_candles": 0,
             }
+
+        # ---------------------------------------------------------
+        # 5. Append and deduplicate.
+        # ---------------------------------------------------------
 
         existing = pd.read_csv(
             M1_FILE,
             parse_dates=["timestamp"],
+        )
+
+        existing["timestamp"] = pd.to_datetime(
+            existing["timestamp"],
+            utc=True,
         )
 
         combined = pd.concat(
@@ -147,7 +226,10 @@ def refresh_incremental() -> dict:
 
         combined = (
             combined
-            .drop_duplicates("timestamp", keep="last")
+            .drop_duplicates(
+                "timestamp",
+                keep="last",
+            )
             .sort_values("timestamp")
             .reset_index(drop=True)
         )
@@ -157,12 +239,49 @@ def refresh_incremental() -> dict:
             index=False,
         )
 
-        # Rebuild timeframe files from the updated M1 data.
+        # ---------------------------------------------------------
+        # 6. Rebuild all derived timeframes.
+        #
+        # M1 data may contain the currently forming candle boundary,
+        # but derived timeframes must contain COMPLETED candles only.
+        # The latest completed M1 timestamp is the authoritative MT5
+        # server-time boundary.
+        # ---------------------------------------------------------
+
+        completed_m1_cutoff = (
+            latest_completed_timestamp
+            + pd.Timedelta(minutes=1)
+        )
+
         for name, rule in TIMEFRAME_FILES.items():
             tf = resample_ohlcv(
                 combined,
                 rule,
             )
+
+            if not tf.empty:
+                timeframe_minutes = {
+                    "M3": 3,
+                    "M5": 5,
+                    "M15": 15,
+                    "M30": 30,
+                    "H1": 60,
+                    "H4": 240,
+                    "D1": 1440,
+                    "W1": 10080,
+                }
+
+                minutes = timeframe_minutes.get(name)
+
+                if minutes is not None:
+                    candle_end = (
+                        tf["timestamp"]
+                        + pd.Timedelta(minutes=minutes)
+                    )
+
+                    tf = tf.loc[
+                        candle_end <= completed_m1_cutoff
+                    ].copy()
 
             tf.to_csv(
                 DATA_DIR / f"XAUUSD_{name}.csv",
@@ -172,6 +291,9 @@ def refresh_incremental() -> dict:
         return {
             "status": "UPDATED",
             "previous_last_timestamp": str(last_timestamp),
+            "latest_mt5_timestamp": str(
+                latest_completed_timestamp
+            ),
             "new_candles": int(len(new_df)),
             "last_timestamp": str(
                 combined["timestamp"].iloc[-1]
@@ -185,3 +307,4 @@ def refresh_incremental() -> dict:
 if __name__ == "__main__":
     result = refresh_incremental()
     print(result)
+
